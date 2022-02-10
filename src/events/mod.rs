@@ -19,7 +19,7 @@ pub enum EngineEvent {
     /// Warning: represents a warning message event.
     Warning(EventDetails, EventMessage),
     /// Error: represents an error event.
-    Error(EngineError),
+    Error(EngineError, Option<EventMessage>),
     /// Waiting: represents an engine waiting event.
     ///
     /// Engine is waiting for a task to be done.
@@ -52,7 +52,7 @@ impl EngineEvent {
             EngineEvent::Debug(details, _message) => details,
             EngineEvent::Info(details, _message) => details,
             EngineEvent::Warning(details, _message) => details,
-            EngineEvent::Error(engine_error) => engine_error.event_details(),
+            EngineEvent::Error(engine_error, _message) => engine_error.event_details(),
             EngineEvent::Waiting(details, _message) => details,
             EngineEvent::Deploying(details, _message) => details,
             EngineEvent::Pausing(details, _message) => details,
@@ -69,7 +69,7 @@ impl EngineEvent {
             EngineEvent::Debug(_details, message) => message.message(message_verbosity),
             EngineEvent::Info(_details, message) => message.message(message_verbosity),
             EngineEvent::Warning(_details, message) => message.message(message_verbosity),
-            EngineEvent::Error(engine_error) => engine_error.message(),
+            EngineEvent::Error(engine_error, _message) => engine_error.message(),
             EngineEvent::Waiting(_details, message) => message.message(message_verbosity),
             EngineEvent::Deploying(_details, message) => message.message(message_verbosity),
             EngineEvent::Pausing(_details, message) => message.message(message_verbosity),
@@ -445,7 +445,13 @@ impl EventDetails {
 
 #[cfg(test)]
 mod tests {
-    use crate::events::{EnvironmentStep, EventMessage, EventMessageVerbosity, InfrastructureStep, Stage};
+    use crate::cloud_provider::aws::regions::AwsRegion;
+    use crate::cloud_provider::Kind::Aws;
+    use crate::errors::{CommandError, EngineError};
+    use crate::events::{
+        EngineEvent, EnvironmentStep, EventDetails, EventMessage, InfrastructureStep, Stage, Transmitter,
+    };
+    use crate::models::QoveryIdentifier;
 
     #[test]
     fn test_event_message() {

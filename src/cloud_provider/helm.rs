@@ -199,8 +199,11 @@ pub trait HelmChart: Send {
         let payload = match self.exec(&kubernetes_config, &envs, payload.clone()) {
             Ok(payload) => payload,
             Err(e) => {
-                error!("Error while deploying chart: {}", e.message());
-                self.on_deploy_failure(&kubernetes_config, &envs, payload)?;
+                error!("Error while deploying chart: {}", e.message()).on_deploy_failure(
+                    &kubernetes_config,
+                    &envs,
+                    payload,
+                )?;
                 return Err(e);
             }
         };

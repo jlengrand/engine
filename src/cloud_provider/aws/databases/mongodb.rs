@@ -14,7 +14,7 @@ use crate::cloud_provider::utilities::{
 use crate::cloud_provider::DeploymentTarget;
 use crate::cmd::helm::Timeout;
 use crate::cmd::kubectl;
-use crate::error::{EngineError, EngineErrorScope, StringError};
+use crate::errors::{CommandError, EngineError};
 use crate::events::{EnvironmentStep, Stage, ToTransmitter, Transmitter};
 use crate::models::DatabaseMode::MANAGED;
 use crate::models::{Context, Listen, Listener, Listeners};
@@ -160,12 +160,8 @@ impl Service for MongoDB {
         let mut context = default_tera_context(self, target.kubernetes, target.environment);
 
         // we need the kubernetes config file to store tfstates file in kube secrets
-        let kube_config_file_path = match kubernetes.get_kubeconfig_file_path() {
-            Ok(path) => path,
-            Err(e) => {
-                return Err(e.to_legacy_engine_error());
-            }
-        };
+        let kube_config_file_path = kubernetes.get_kubeconfig_file_path()?;
+
         context.insert("kubeconfig_path", &kube_config_file_path);
 
         kubectl::kubectl_exec_create_namespace_without_labels(
@@ -223,14 +219,6 @@ impl Service for MongoDB {
 
     fn selector(&self) -> Option<String> {
         Some(format!("app={}", self.sanitized_name()))
-    }
-
-    fn engine_error_scope(&self) -> EngineErrorScope {
-        EngineErrorScope::Database(
-            self.id().to_string(),
-            self.service_type().name().to_string(),
-            self.name().to_string(),
-        )
     }
 }
 
@@ -384,7 +372,7 @@ impl Listen for MongoDB {
     }
 }
 
-fn get_mongodb_version(requested_version: String, is_managed_service: bool) -> Result<String, StringError> {
+fn get_mongodb_version(requested_version: String, is_managed_service: bool) -> Result<String, CommandError> {
     if is_managed_service {
         get_managed_mongodb_version(requested_version)
     } else {
@@ -392,7 +380,7 @@ fn get_mongodb_version(requested_version: String, is_managed_service: bool) -> R
     }
 }
 
-fn get_managed_mongodb_version(requested_version: String) -> Result<String, StringError> {
+fn get_managed_mongodb_version(requested_version: String) -> Result<String, CommandError> {
     let mut supported_mongodb_versions = HashMap::new();
 
     // v3.6.0

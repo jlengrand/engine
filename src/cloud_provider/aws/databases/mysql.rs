@@ -245,14 +245,6 @@ impl Service for MySQL {
     fn selector(&self) -> Option<String> {
         Some(format!("app={}", self.sanitized_name()))
     }
-
-    fn engine_error_scope(&self) -> EngineErrorScope {
-        EngineErrorScope::Database(
-            self.id().to_string(),
-            self.service_type().name().to_string(),
-            self.name().to_string(),
-        )
-    }
 }
 
 impl Database for MySQL {}

@@ -9,7 +9,7 @@ use crate::cloud_provider::utilities::{get_self_hosted_mongodb_version, print_ac
 use crate::cloud_provider::DeploymentTarget;
 use crate::cmd::helm::Timeout;
 use crate::cmd::kubectl;
-use crate::error::{EngineError, EngineErrorScope};
+use crate::errors::EngineError;
 use crate::events::{EnvironmentStep, Stage, ToTransmitter, Transmitter};
 use crate::models::DatabaseMode::MANAGED;
 use crate::models::{Context, Listen, Listener, Listeners};
@@ -158,12 +158,8 @@ impl Service for MongoDB {
         let mut context = default_tera_context(self, kubernetes, environment);
 
         // we need the kubernetes config file to store tfstates file in kube secrets
-        let kube_config_file_path = match kubernetes.get_kubeconfig_file_path() {
-            Ok(path) => path,
-            Err(e) => {
-                return Err(e.to_legacy_engine_error());
-            }
-        };
+        let kube_config_file_path = kubernetes.get_kubeconfig_file_path()?;
+
         context.insert("kubeconfig_path", &kube_config_file_path);
 
         kubectl::kubectl_exec_create_namespace_without_labels(
@@ -217,14 +213,6 @@ impl Service for MongoDB {
 
     fn selector(&self) -> Option<String> {
         Some(format!("app={}", self.sanitized_name()))
-    }
-
-    fn engine_error_scope(&self) -> EngineErrorScope {
-        EngineErrorScope::Database(
-            self.id().to_string(),
-            self.service_type().name().to_string(),
-            self.name().to_string(),
-        )
     }
 }
 

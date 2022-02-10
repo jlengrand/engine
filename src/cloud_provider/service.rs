@@ -9,16 +9,15 @@ use tera::Context as TeraContext;
 use crate::build_platform::Image;
 use crate::cloud_provider::environment::Environment;
 use crate::cloud_provider::kubernetes::Kubernetes;
-use crate::cloud_provider::utilities::check_domain_for;
+use crate::cloud_provider::utilities::{check_domain_for, VersionsNumber};
 use crate::cloud_provider::DeploymentTarget;
 use crate::cmd::helm::Timeout;
 use crate::cmd::kubectl::ScalingKind::Statefulset;
 use crate::cmd::kubectl::{kubectl_exec_delete_secret, kubectl_exec_scale_replicas_by_selector, ScalingKind};
 use crate::cmd::structs::LabelsContent;
-use crate::error::StringError;
-use crate::error::{EngineError, EngineErrorCause, EngineErrorScope};
-use crate::errors::{CommandError, EngineError as NewEngineError};
-use crate::events::{EnvironmentStep, EventDetails, GeneralStep, Stage, ToTransmitter};
+use crate::errors::{CommandError, EngineError};
+use crate::events::{EngineEvent, EnvironmentStep, EventDetails, EventMessage, GeneralStep, Stage, ToTransmitter};
+use crate::logger::{LogLevel, Logger};
 use crate::models::ProgressLevel::Info;
 use crate::models::{
     Context, DatabaseMode, Listen, Listeners, ListenersHelper, ProgressInfo, ProgressLevel, ProgressScope,
@@ -85,9 +84,15 @@ pub trait Service: ToTransmitter {
     }
     fn tera_context(&self, target: &DeploymentTarget) -> Result<TeraContext, EngineError>;
     // used to retrieve logs by using Kubernetes labels (selector)
+    fn logger(&self) -> &dyn Logger;
     fn selector(&self) -> Option<String>;
-    fn debug_logs(&self, deployment_target: &DeploymentTarget, event_details: EventDetails) -> Vec<String> {
-        debug_logs(self, deployment_target, event_details)
+    fn debug_logs(
+        &self,
+        deployment_target: &DeploymentTarget,
+        event_details: EventDetails,
+        logger: &dyn Logger,
+    ) -> Vec<String> {
+        debug_logs(self, deployment_target, event_details, logger)
     }
     fn is_listening(&self, ip: &str) -> bool {
         let private_port = match self.private_port() {
@@ -97,25 +102,15 @@ pub trait Service: ToTransmitter {
 
         TcpStream::connect(format!("{}:{}", ip, private_port)).is_ok()
     }
-    fn engine_error_scope(&self) -> EngineErrorScope;
-    fn engine_error(&self, cause: EngineErrorCause, message: String) -> EngineError {
-        EngineError::new(
-            cause,
-            self.engine_error_scope(),
-            self.context().execution_id(),
-            Some(message),
-        )
-    }
     fn is_valid(&self) -> Result<(), EngineError> {
         let binaries = ["kubectl", "helm", "terraform", "aws-iam-authenticator"];
 
         for binary in binaries.iter() {
             if !crate::cmd::utilities::does_binary_exist(binary) {
-                return Err(NewEngineError::new_missing_required_binary(
+                return Err(EngineError::new_missing_required_binary(
                     self.get_event_details(Stage::General(GeneralStep::ValidateSystemRequirements)),
                     binary.to_string(),
-                )
-                .to_legacy_engine_error());
+                ));
             }
         }
 
@@ -306,7 +301,12 @@ impl<'a> ToString for ServiceType<'a> {
     }
 }
 
-pub fn debug_logs<T>(service: &T, deployment_target: &DeploymentTarget, event_details: EventDetails) -> Vec<String>
+pub fn debug_logs<T>(
+    service: &T,
+    deployment_target: &DeploymentTarget,
+    event_details: EventDetails,
+    logger: &dyn Logger,
+) -> Vec<String>
 where
     T: Service + ?Sized,
 {
@@ -315,12 +315,18 @@ where
     match get_stateless_resource_information_for_user(kubernetes, environment, service, event_details.clone()) {
         Ok(lines) => lines,
         Err(err) => {
-            error!(
-                "error while retrieving debug logs from {} {}; error: {:?}",
-                service.service_type().name(),
-                service.name_with_id(),
-                err
+            logger.log(
+                LogLevel::Error,
+                EngineEvent::Error(
+                    err,
+                    Some(EventMessage::new_from_safe(format!(
+                        "error while retrieving debug logs from {} {}",
+                        service.service_type().name(),
+                        service.name_with_id(),
+                    ))),
+                ),
             );
+
             Vec::new()
         }
     }
@@ -361,24 +367,21 @@ pub fn default_tera_context(
 
 /// deploy a stateless service created by the user (E.g: App or External Service)
 /// the difference with `deploy_service(..)` is that this function provides the thrown error in case of failure
-pub fn deploy_user_stateless_service<T>(target: &DeploymentTarget, service: &T) -> Result<(), EngineError>
+pub fn deploy_user_stateless_service<T>(
+    target: &DeploymentTarget,
+    service: &T,
+    event_details: EventDetails,
+) -> Result<(), EngineError>
 where
     T: Service + Helm,
 {
     deploy_stateless_service(
         target,
         service,
-        service.engine_error(
-            EngineErrorCause::User(
-                "Your application has failed to start. \
-                Ensure you can run it without issues with `qovery run` and check its logs from the web interface or the CLI with `qovery log`. \
-                This issue often occurs due to ports misconfiguration. Make sure you exposed the correct port (using EXPOSE statement in Dockerfile or via Qovery configuration).",
-            ),
-            format!(
-                "{} {} has failed to start ⤬",
-                service.service_type().name(),
-                service.name_with_id()
-            ),
+        EngineError::new_client_service_failed_to_start_error(
+            event_details,
+            service.name_with_id(),
+            service.service_type().name(),
         ),
     )
 }
@@ -396,27 +399,23 @@ where
     let environment = target.environment;
     let workspace_dir = service.workspace_directory();
     let tera_context = service.tera_context(target)?;
-    let event_details = service.get_event_details(Stage::Environment(EnvironmentStep::Deploy));
+    let event_details = thrown_error.event_details().clone();
 
     if let Err(e) = crate::template::generate_and_copy_all_files_into_dir(
         service.helm_chart_dir(),
         workspace_dir.as_str(),
         tera_context,
     ) {
-        return Err(NewEngineError::new_cannot_copy_files_from_one_directory_to_another(
+        return Err(EngineError::new_cannot_copy_files_from_one_directory_to_another(
             event_details.clone(),
             service.helm_chart_dir(),
             workspace_dir.to_string(),
             e,
-        )
-        .to_legacy_engine_error());
+        ));
     }
 
     let helm_release_name = service.helm_release_name();
-    let kubernetes_config_file_path = match kubernetes.get_kubeconfig_file_path() {
-        Ok(path) => path,
-        Err(e) => return Err(e.to_legacy_engine_error()),
-    };
+    let kubernetes_config_file_path = kubernetes.get_kubeconfig_file_path()?;
 
     // define labels to add to namespace
     let namespace_labels = service.context().resource_expiration_in_seconds().map(|_| {
@@ -436,8 +435,7 @@ where
         kubernetes.cloud_provider().credentials_environment_variables(),
     )
     .map_err(|e| {
-        NewEngineError::new_k8s_create_namespace(event_details.clone(), environment.namespace().to_string(), e)
-            .to_legacy_engine_error()
+        EngineError::new_k8s_create_namespace(event_details.clone(), environment.namespace().to_string(), e)
     })?;
 
     // do exec helm upgrade and return the last deployment status
@@ -451,7 +449,7 @@ where
         kubernetes.cloud_provider().credentials_environment_variables(),
         service.service_type(),
     )
-    .map_err(|e| NewEngineError::new_helm_charts_upgrade_error(event_details.clone(), e).to_legacy_engine_error())?;
+    .map_err(|e| EngineError::new_helm_charts_upgrade_error(event_details.clone(), e))?;
 
     // check deployment status
     if helm_history_row.is_none()
@@ -469,13 +467,12 @@ where
         kubernetes.cloud_provider().credentials_environment_variables(),
     )
     .map_err(|e| {
-        NewEngineError::new_k8s_pod_not_ready(
+        EngineError::new_k8s_pod_not_ready(
             event_details.clone(),
             service.selector().unwrap_or("".to_string()),
             environment.namespace().to_string(),
             e,
         )
-        .to_legacy_engine_error()
     })?;
 
     Ok(())
@@ -490,10 +487,7 @@ where
     let environment = target.environment;
     let helm_release_name = service.helm_release_name();
     let event_details = service.get_event_details(Stage::Environment(EnvironmentStep::Deploy));
-    let kubernetes_config_file_path = match kubernetes.get_kubeconfig_file_path() {
-        Ok(path) => path,
-        Err(e) => return Err(e.to_legacy_engine_error()),
-    };
+    let kubernetes_config_file_path = kubernetes.get_kubeconfig_file_path()?;
 
     let history_rows = crate::cmd::helm::helm_exec_history(
         kubernetes_config_file_path.as_str(),
@@ -502,13 +496,12 @@ where
         &kubernetes.cloud_provider().credentials_environment_variables(),
     )
     .map_err(|e| {
-        NewEngineError::new_helm_chart_history_error(
+        EngineError::new_helm_chart_history_error(
             event_details.clone(),
             helm_release_name.to_string(),
             environment.namespace().to_string(),
             e,
         )
-        .to_legacy_engine_error()
     })?;
 
     if history_rows.len() == 1 {
@@ -519,8 +512,7 @@ where
             kubernetes.cloud_provider().credentials_environment_variables(),
         )
         .map_err(|e| {
-            NewEngineError::new_helm_chart_uninstall_error(event_details.clone(), helm_release_name.to_string(), e)
-                .to_legacy_engine_error()
+            EngineError::new_helm_chart_uninstall_error(event_details.clone(), helm_release_name.to_string(), e)
         })?;
     }
 
@@ -540,10 +532,7 @@ pub fn scale_down_database(
     let event_details = service.get_event_details(Stage::Environment(EnvironmentStep::ScaleDown));
     let kubernetes = target.kubernetes;
     let environment = target.environment;
-    let kubernetes_config_file_path = match kubernetes.get_kubeconfig_file_path() {
-        Ok(path) => path,
-        Err(e) => return Err(e.to_legacy_engine_error()),
-    };
+    let kubernetes_config_file_path = kubernetes.get_kubeconfig_file_path()?;
 
     let selector = format!("databaseId={}", service.id());
     kubectl_exec_scale_replicas_by_selector(
@@ -555,14 +544,13 @@ pub fn scale_down_database(
         replicas_count as u32,
     )
     .map_err(|e| {
-        NewEngineError::new_k8s_scale_replicas(
+        EngineError::new_k8s_scale_replicas(
             event_details.clone(),
             selector.to_string(),
             environment.namespace().to_string(),
             replicas_count as u32,
             e,
         )
-        .to_legacy_engine_error()
     })
 }
 
@@ -575,10 +563,7 @@ pub fn scale_down_application(
     let event_details = service.get_event_details(Stage::Environment(EnvironmentStep::ScaleDown));
     let kubernetes = target.kubernetes;
     let environment = target.environment;
-    let kubernetes_config_file_path = match kubernetes.get_kubeconfig_file_path() {
-        Ok(path) => path,
-        Err(e) => return Err(e.to_legacy_engine_error()),
-    };
+    let kubernetes_config_file_path = kubernetes.get_kubeconfig_file_path()?;
 
     kubectl_exec_scale_replicas_by_selector(
         kubernetes_config_file_path,
@@ -589,14 +574,13 @@ pub fn scale_down_application(
         replicas_count as u32,
     )
     .map_err(|e| {
-        NewEngineError::new_k8s_scale_replicas(
+        EngineError::new_k8s_scale_replicas(
             event_details.clone(),
             service.selector().unwrap_or("".to_string()),
             environment.namespace().to_string(),
             replicas_count as u32,
             e,
         )
-        .to_legacy_engine_error()
     })
 }
 
@@ -651,6 +635,7 @@ pub fn deploy_stateful_service<T>(
     target: &DeploymentTarget,
     service: &T,
     event_details: EventDetails,
+    logger: &dyn Logger,
 ) -> Result<(), EngineError>
 where
     T: StatefulService + Helm + Terraform,
@@ -660,11 +645,16 @@ where
     let environment = target.environment;
 
     if service.is_managed_service() {
-        info!(
-            "deploy {} with name {} on {}",
-            service.service_type().name(),
-            service.name_with_id(),
-            kubernetes.cloud_provider().kind().to_string()
+        logger.log(
+            LogLevel::Info,
+            EngineEvent::Deploying(
+                event_details.clone(),
+                EventMessage::new_from_safe(format!(
+                    "Deploying managed {} `{}`",
+                    service.service_type().name(),
+                    service.name_with_id()
+                )),
+            ),
         );
 
         let context = service.tera_context(target)?;
@@ -674,13 +664,12 @@ where
             &workspace_dir,
             context.clone(),
         ) {
-            return Err(NewEngineError::new_cannot_copy_files_from_one_directory_to_another(
+            return Err(EngineError::new_cannot_copy_files_from_one_directory_to_another(
                 event_details.clone(),
                 service.terraform_common_resource_dir_path(),
                 workspace_dir.to_string(),
                 e,
-            )
-            .to_legacy_engine_error());
+            ));
         }
 
         if let Err(e) = crate::template::generate_and_copy_all_files_into_dir(
@@ -688,13 +677,12 @@ where
             &workspace_dir,
             context.clone(),
         ) {
-            return Err(NewEngineError::new_cannot_copy_files_from_one_directory_to_another(
+            return Err(EngineError::new_cannot_copy_files_from_one_directory_to_another(
                 event_details.clone(),
                 service.terraform_resource_dir_path(),
                 workspace_dir.to_string(),
                 e,
-            )
-            .to_legacy_engine_error());
+            ));
         }
 
         let external_svc_dir = format!("{}/{}", workspace_dir, "external-name-svc");
@@ -703,13 +691,12 @@ where
             external_svc_dir.as_str(),
             context.clone(),
         ) {
-            return Err(NewEngineError::new_cannot_copy_files_from_one_directory_to_another(
+            return Err(EngineError::new_cannot_copy_files_from_one_directory_to_another(
                 event_details.clone(),
                 service.helm_chart_external_name_service_dir(),
                 external_svc_dir.to_string(),
                 e,
-            )
-            .to_legacy_engine_error());
+            ));
         }
 
         let _ = crate::cmd::terraform::terraform_init_validate_plan_apply(
@@ -717,24 +704,24 @@ where
             service.context().is_dry_run_deploy(),
         )
         .map_err(|e| {
-            NewEngineError::new_terraform_error_while_executing_pipeline(event_details.clone(), e)
-                .to_legacy_engine_error()
+            EngineError::new_terraform_error_while_executing_pipeline(event_details.clone(), e).to_legacy_engine_error()
         })?;
     } else {
         // use helm
-        info!(
-            "deploy {} with name {} on {:?} Kubernetes cluster id {}",
-            service.service_type().name(),
-            service.name_with_id(),
-            kubernetes.cloud_provider().kind().to_string(),
-            kubernetes.id()
+        logger.log(
+            LogLevel::Info,
+            EngineEvent::Deploying(
+                event_details.clone(),
+                EventMessage::new_from_safe(format!(
+                    "Deploying containerized {} `{}` on Kubernetes cluster",
+                    service.service_type().name(),
+                    service.name_with_id()
+                )),
+            ),
         );
 
         let context = service.tera_context(target)?;
-        let kubernetes_config_file_path = match kubernetes.get_kubeconfig_file_path() {
-            Ok(path) => path,
-            Err(e) => return Err(e.to_legacy_engine_error()),
-        };
+        let kubernetes_config_file_path = kubernetes.get_kubeconfig_file_path()?;
 
         // default chart
         if let Err(e) = crate::template::generate_and_copy_all_files_into_dir(
@@ -742,13 +729,12 @@ where
             workspace_dir.as_str(),
             context.clone(),
         ) {
-            return Err(NewEngineError::new_cannot_copy_files_from_one_directory_to_another(
+            return Err(EngineError::new_cannot_copy_files_from_one_directory_to_another(
                 event_details.clone(),
                 service.helm_chart_dir(),
                 workspace_dir.to_string(),
                 e,
-            )
-            .to_legacy_engine_error());
+            ));
         }
 
         // overwrite with our chart values
@@ -757,13 +743,12 @@ where
             workspace_dir.as_str(),
             context.clone(),
         ) {
-            return Err(NewEngineError::new_cannot_copy_files_from_one_directory_to_another(
+            return Err(EngineError::new_cannot_copy_files_from_one_directory_to_another(
                 event_details.clone(),
                 service.helm_chart_values_dir(),
                 workspace_dir.to_string(),
                 e,
-            )
-            .to_legacy_engine_error());
+            ));
         }
 
         // define labels to add to namespace
@@ -784,7 +769,7 @@ where
             kubernetes.cloud_provider().credentials_environment_variables(),
         )
         .map_err(|e| {
-            NewEngineError::new_k8s_create_namespace(event_details.clone(), environment.namespace().to_string(), e)
+            EngineError::new_k8s_create_namespace(event_details.clone(), environment.namespace().to_string(), e)
                 .to_legacy_engine_error()
         })?;
 
@@ -799,40 +784,37 @@ where
             kubernetes.cloud_provider().credentials_environment_variables(),
             service.service_type(),
         )
-        .map_err(|e| {
-            NewEngineError::new_helm_charts_upgrade_error(event_details.clone(), e).to_legacy_engine_error()
-        })?;
+        .map_err(|e| EngineError::new_helm_charts_upgrade_error(event_details.clone(), e).to_legacy_engine_error())?;
 
         // check deployment status
         if helm_history_row.is_none() || !helm_history_row.unwrap().is_successfully_deployed() {
-            return Err(service.engine_error(
-                EngineErrorCause::Internal,
-                format!(
-                    "{} service fails to be deployed (before start)",
-                    service.service_type().name()
-                ),
+            return Err(EngineError::new_client_service_failed_to_deploy_before_start_error(
+                event_details.clone(),
+                service.name_with_id(),
+                service.service_type().name(),
             ));
         }
 
         // check app status
-        match crate::cmd::kubectl::kubectl_exec_is_pod_ready_with_retry(
+        let is_pod_ready = crate::cmd::kubectl::kubectl_exec_is_pod_ready_with_retry(
             &kubernetes_config_file_path,
             environment.namespace(),
             service.selector().unwrap_or("".to_string()).as_str(),
             kubernetes.cloud_provider().credentials_environment_variables(),
-        ) {
-            Ok(Some(true)) => {}
-            _ => {
-                return Err(service.engine_error(
-                    EngineErrorCause::Internal,
-                    format!(
-                        "{} database {} failed to start after several retries",
-                        service.service_type().name(),
-                        service.name_with_id()
-                    ),
-                ));
-            }
+        );
+        if let Ok(Some(true)) = is_pod_ready {
+            return Ok(());
         }
+
+        return Err(EngineError::new_database_failed_to_start_after_several_retries(
+            event_details.clone(),
+            service.name_with_id(),
+            service.service_type().name(),
+            match is_pod_ready {
+                Err(e) => Some(e),
+                _ => None,
+            },
+        ));
     }
 
     Ok(())
@@ -842,6 +824,7 @@ pub fn delete_stateful_service<T>(
     target: &DeploymentTarget,
     service: &T,
     event_details: EventDetails,
+    logger: &dyn Logger,
 ) -> Result<(), EngineError>
 where
     T: StatefulService + Helm + Terraform,
@@ -857,13 +840,12 @@ where
             workspace_dir.as_str(),
             tera_context.clone(),
         ) {
-            return Err(NewEngineError::new_cannot_copy_files_from_one_directory_to_another(
+            return Err(EngineError::new_cannot_copy_files_from_one_directory_to_another(
                 event_details.clone(),
                 service.terraform_common_resource_dir_path(),
                 workspace_dir.to_string(),
                 e,
-            )
-            .to_legacy_engine_error());
+            ));
         }
 
         if let Err(e) = crate::template::generate_and_copy_all_files_into_dir(
@@ -871,13 +853,12 @@ where
             workspace_dir.as_str(),
             tera_context.clone(),
         ) {
-            return Err(NewEngineError::new_cannot_copy_files_from_one_directory_to_another(
+            return Err(EngineError::new_cannot_copy_files_from_one_directory_to_another(
                 event_details.clone(),
                 service.terraform_resource_dir_path(),
                 workspace_dir.to_string(),
                 e,
-            )
-            .to_legacy_engine_error());
+            ));
         }
 
         let external_svc_dir = format!("{}/{}", workspace_dir, "external-name-svc");
@@ -886,13 +867,12 @@ where
             external_svc_dir.to_string(),
             tera_context.clone(),
         ) {
-            return Err(NewEngineError::new_cannot_copy_files_from_one_directory_to_another(
+            return Err(EngineError::new_cannot_copy_files_from_one_directory_to_another(
                 event_details.clone(),
                 service.helm_chart_external_name_service_dir(),
                 external_svc_dir.to_string(),
                 e,
-            )
-            .to_legacy_engine_error());
+            ));
         }
 
         if let Err(e) = crate::template::generate_and_copy_all_files_into_dir(
@@ -900,26 +880,33 @@ where
             workspace_dir.as_str(),
             tera_context.clone(),
         ) {
-            return Err(NewEngineError::new_cannot_copy_files_from_one_directory_to_another(
+            return Err(EngineError::new_cannot_copy_files_from_one_directory_to_another(
                 event_details.clone(),
                 service.helm_chart_external_name_service_dir(),
                 workspace_dir.to_string(),
                 e,
-            )
-            .to_legacy_engine_error());
+            ));
         }
 
         match crate::cmd::terraform::terraform_init_validate_destroy(workspace_dir.as_str(), true) {
             Ok(_) => {
-                info!("deleting secret containing tfstates");
+                logger.log(
+                    LogLevel::Info,
+                    EngineEvent::Deleting(
+                        event_details.clone(),
+                        EventMessage::new_from_safe("Deleting secret containing tfstates".to_string()),
+                    ),
+                );
                 let _ =
                     delete_terraform_tfstate_secret(kubernetes, environment.namespace(), &get_tfstate_name(service));
             }
             Err(e) => {
-                let message = format!("{:?}", e);
-                error!("{}", message);
+                let engine_err =
+                    EngineError::new_terraform_error_while_executing_destroy_pipeline(event_details.clone(), e);
 
-                return Err(service.engine_error(EngineErrorCause::Internal, message));
+                logger.log(LogLevel::Error, EngineEvent::Error(engine_err.clone(), None));
+
+                return Err(engine_err);
             }
         }
     } else {
@@ -937,7 +924,35 @@ where
     Ok(())
 }
 
-pub fn check_service_version<T>(result: Result<String, StringError>, service: &T) -> Result<String, EngineError>
+pub struct ServiceVersionCheckResult {
+    requested_version: String,
+    matched_version: Option<String>,
+    message: Option<String>,
+}
+
+impl ServiceVersionCheckResult {
+    pub fn new(requested_version: String, matched_version: Option<String>, message: Option<String>) -> Self {
+        ServiceVersionCheckResult {
+            requested_version,
+            matched_version,
+            message,
+        }
+    }
+
+    pub fn matched_version(&self) -> Option<String> {
+        self.matched_version.clone()
+    }
+
+    pub fn message(&self) -> Option<String> {
+        self.message.clone()
+    }
+}
+
+pub fn check_service_version<T>(
+    result: Result<String, CommandError>,
+    service: &T,
+    event_details: EventDetails,
+) -> Result<ServiceVersionCheckResult, EngineError>
 where
     T: Service + Listen,
 {
@@ -947,13 +962,11 @@ where
         Ok(version) => {
             if service.version() != version.as_str() {
                 let message = format!(
-                    "{} version {} has been requested by the user; but matching version is {}",
+                    "{} version `{}` has been requested by the user; but matching version is `{}`",
                     service.service_type().name(),
                     service.version(),
                     version.as_str()
                 );
-
-                info!("{}", message.as_str());
 
                 let progress_info = ProgressInfo::new(
                     service.progress_scope(),
@@ -963,9 +976,19 @@ where
                 );
 
                 listeners_helper.deployment_in_progress(progress_info);
+
+                return Ok(ServiceVersionCheckResult::new(
+                    service.version(),
+                    Some(version.to_string()),
+                    Some(message.to_string()),
+                ));
             }
 
-            Ok(version)
+            Ok(ServiceVersionCheckResult::new(
+                service.version(),
+                Some(version.to_string()),
+                None,
+            ))
         }
         Err(err) => {
             let message = format!(
@@ -973,8 +996,6 @@ where
                 service.service_type().name(),
                 service.version(),
             );
-
-            error!("{}", message.as_str());
 
             let progress_info = ProgressInfo::new(
                 service.progress_scope(),
@@ -985,14 +1006,10 @@ where
 
             listeners_helper.deployment_error(progress_info);
 
-            error!("{}", err);
-
-            Err(service.engine_error(
-                EngineErrorCause::User(
-                    "The provided database version is not supported, please refer to the \
-                documentation https://docs.qovery.com",
-                ),
-                err,
+            Err(EngineError::new_unsupported_version_error(
+                event_details.clone(),
+                service.service_type().name(),
+                service.version(),
             ))
         }
     }
@@ -1003,10 +1020,7 @@ fn delete_terraform_tfstate_secret(
     namespace: &str,
     secret_name: &str,
 ) -> Result<(), EngineError> {
-    let config_file_path = match kubernetes.get_kubeconfig_file_path() {
-        Ok(path) => path,
-        Err(e) => return Err(e.to_legacy_engine_error()),
-    };
+    let config_file_path = kubernetes.get_kubeconfig_file_path()?;
 
     // create the namespace to insert the tfstate in secrets
     let _ = kubectl_exec_delete_secret(
@@ -1030,43 +1044,55 @@ pub fn check_kubernetes_service_error<T>(
     kubernetes: &dyn Kubernetes,
     service: &Box<T>,
     event_details: EventDetails,
+    logger: &dyn Logger,
     deployment_target: &DeploymentTarget,
     listeners_helper: &ListenersHelper,
     action_verb: &str,
     action: CheckAction,
-) -> Result<(), NewEngineError>
+) -> Result<(), EngineError>
 where
     T: Service + ?Sized,
 {
+    let message = format!(
+        "{} {} {}",
+        action_verb,
+        service.service_type().name().to_lowercase(),
+        service.name()
+    );
+
     let progress_info = ProgressInfo::new(
         service.progress_scope(),
         ProgressLevel::Info,
-        Some(format!(
-            "{} {} {}",
-            action_verb,
-            service.service_type().name().to_lowercase(),
-            service.name()
-        )),
+        Some(message.to_string()),
         kubernetes.context().execution_id(),
     );
 
     match action {
-        CheckAction::Deploy => listeners_helper.deployment_in_progress(progress_info),
-        CheckAction::Pause => listeners_helper.pause_in_progress(progress_info),
-        CheckAction::Delete => listeners_helper.delete_in_progress(progress_info),
+        CheckAction::Deploy => {
+            listeners_helper.deployment_in_progress(progress_info);
+            logger.log(
+                LogLevel::Info,
+                EngineEvent::Deploying(event_details.clone(), EventMessage::new_from_safe(message.to_string())),
+            );
+        }
+        CheckAction::Pause => {
+            listeners_helper.pause_in_progress(progress_info);
+            logger.log(
+                LogLevel::Info,
+                EngineEvent::Pausing(event_details.clone(), EventMessage::new_from_safe(message.to_string())),
+            );
+        }
+        CheckAction::Delete => {
+            listeners_helper.delete_in_progress(progress_info);
+            logger.log(
+                LogLevel::Info,
+                EngineEvent::Deleting(event_details.clone(), EventMessage::new_from_safe(message.to_string())),
+            );
+        }
     }
 
     match result {
         Err(err) => {
-            error!(
-                "{} error with {} {} , id: {} => {:?}",
-                action_verb,
-                service.service_type().name(),
-                service.name(),
-                service.id(),
-                err
-            );
-
             let progress_info = ProgressInfo::new(
                 service.progress_scope(),
                 ProgressLevel::Error,
@@ -1078,6 +1104,20 @@ where
                     err
                 )),
                 kubernetes.context().execution_id(),
+            );
+
+            logger.log(
+                LogLevel::Error,
+                EngineEvent::Error(
+                    err,
+                    Some(EventMessage::new_from_safe(format!(
+                        "{} error with {} {} , id: {}",
+                        action_verb,
+                        service.service_type().name(),
+                        service.name(),
+                        service.id(),
+                    ))),
+                ),
             );
 
             match action {
@@ -1093,8 +1133,6 @@ where
                 String::from("<no debug logs>")
             };
 
-            info!("{}", debug_logs_string);
-
             let progress_info = ProgressInfo::new(
                 service.progress_scope(),
                 ProgressLevel::Debug,
@@ -1108,7 +1146,7 @@ where
                 CheckAction::Delete => listeners_helper.delete_error(progress_info),
             }
 
-            return Err(NewEngineError::new_k8s_service_issue(
+            return Err(EngineError::new_k8s_service_issue(
                 event_details.clone(),
                 CommandError::new(err.message.unwrap_or("No error message.".to_string()), None),
             ));
@@ -1166,7 +1204,7 @@ where
         kubernetes.cloud_provider().credentials_environment_variables(),
     )
     .map_err(|e| {
-        NewEngineError::new_k8s_get_logs_error(
+        EngineError::new_k8s_get_logs_error(
             event_details.clone(),
             selector.to_string(),
             environment.namespace().to_string(),
@@ -1184,7 +1222,7 @@ where
         Some(selector.as_str()),
         kubernetes.cloud_provider().credentials_environment_variables(),
     )
-    .map_err(|e| NewEngineError::new_k8s_cannot_get_pods(event_details.clone(), e).to_legacy_engine_error())?
+    .map_err(|e| EngineError::new_k8s_cannot_get_pods(event_details.clone(), e).to_legacy_engine_error())?
     .items;
 
     for pod in pods {
@@ -1224,7 +1262,7 @@ where
         kubernetes.cloud_provider().credentials_environment_variables(),
     )
     .map_err(|e| {
-        NewEngineError::new_k8s_get_json_events(event_details.clone(), environment.namespace().to_string(), e)
+        EngineError::new_k8s_get_json_events(event_details.clone(), environment.namespace().to_string(), e)
             .to_legacy_engine_error()
     })?
     .items;
@@ -1266,7 +1304,7 @@ pub fn get_stateless_resource_information(
         kubernetes.cloud_provider().credentials_environment_variables(),
     )
     .map_err(|e| {
-        NewEngineError::new_k8s_describe(
+        EngineError::new_k8s_describe(
             event_details.clone(),
             selector.to_string(),
             environment.namespace().to_string(),
@@ -1283,7 +1321,7 @@ pub fn get_stateless_resource_information(
         kubernetes.cloud_provider().credentials_environment_variables(),
     )
     .map_err(|e| {
-        NewEngineError::new_k8s_get_logs_error(
+        EngineError::new_k8s_get_logs_error(
             event_details.clone(),
             selector.to_string(),
             environment.namespace().to_string(),
@@ -1313,7 +1351,7 @@ pub fn helm_uninstall_release(
         &kubernetes.cloud_provider().credentials_environment_variables(),
     )
     .map_err(|e| {
-        NewEngineError::new_k8s_history(event_details.clone(), environment.namespace().to_string(), e)
+        EngineError::new_k8s_history(event_details.clone(), environment.namespace().to_string(), e)
             .to_legacy_engine_error()
     })?;
 
@@ -1328,7 +1366,7 @@ pub fn helm_uninstall_release(
             kubernetes.cloud_provider().credentials_environment_variables(),
         )
         .map_err(|e| {
-            NewEngineError::new_helm_chart_uninstall_error(event_details.clone(), helm_release_name.to_string(), e)
+            EngineError::new_helm_chart_uninstall_error(event_details.clone(), helm_release_name.to_string(), e)
                 .to_legacy_engine_error()
         })?;
     }
@@ -1378,6 +1416,10 @@ where
     M: Into<String>,
     F: Fn() -> R,
 {
+    let event_details = service
+        .get_event_details(Stage::Environment(EnvironmentStep::Deploy))
+        .clone();
+    let logger = service.logger().clone_dyn();
     let listeners = std::clone::Clone::clone(service.listeners());
 
     let progress_info = ProgressInfo::new(
@@ -1397,15 +1439,54 @@ where
             let listeners_helper = ListenersHelper::new(&listeners);
             let action = action;
             let progress_info = progress_info;
+            let waiting_message = waiting_message.unwrap_or("no message ...".to_string());
 
             loop {
                 // do notify users here
                 let progress_info = std::clone::Clone::clone(&progress_info);
+                let event_details = std::clone::Clone::clone(&event_details);
+                let event_message = EventMessage::new_from_safe(waiting_message.to_string());
 
                 match action {
-                    Action::Create => listeners_helper.deployment_in_progress(progress_info),
-                    Action::Pause => listeners_helper.pause_in_progress(progress_info),
-                    Action::Delete => listeners_helper.delete_in_progress(progress_info),
+                    Action::Create => {
+                        listeners_helper.deployment_in_progress(progress_info);
+                        logger.log(
+                            LogLevel::Info,
+                            EngineEvent::Deploying(
+                                EventDetails::clone_changing_stage(
+                                    event_details,
+                                    Stage::Environment(EnvironmentStep::Deploy),
+                                ),
+                                event_message,
+                            ),
+                        );
+                    }
+                    Action::Pause => {
+                        listeners_helper.pause_in_progress(progress_info);
+                        logger.log(
+                            LogLevel::Info,
+                            EngineEvent::Pausing(
+                                EventDetails::clone_changing_stage(
+                                    event_details,
+                                    Stage::Environment(EnvironmentStep::Pause),
+                                ),
+                                event_message,
+                            ),
+                        );
+                    }
+                    Action::Delete => {
+                        listeners_helper.delete_in_progress(progress_info);
+                        logger.log(
+                            LogLevel::Info,
+                            EngineEvent::Deleting(
+                                EventDetails::clone_changing_stage(
+                                    event_details,
+                                    Stage::Environment(EnvironmentStep::Delete),
+                                ),
+                                event_message,
+                            ),
+                        );
+                    }
                     Action::Nothing => {} // should not happens
                 };
 

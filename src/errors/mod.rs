@@ -192,6 +192,12 @@ pub enum Tag {
     ObjectStorageCannotCreateBucket,
     /// ObjectStorageCannotPutFileIntoBucket: represents an error while trying to put a file into an object storage bucket.
     ObjectStorageCannotPutFileIntoBucket,
+    /// ClientServiceFailedToStart: represent an error while trying to start a client's service.
+    ClientServiceFailedToStart,
+    /// ClientServiceFailedToDeployBeforeStart: represents an error while trying to deploy a client's service before start.
+    ClientServiceFailedToDeployBeforeStart,
+    /// DatabaseFailedToStartAfterSeveralRetries: represents an error while trying to start a database after several retries.
+    DatabaseFailedToStartAfterSeveralRetries,
 }
 
 #[derive(Clone, Debug)]
@@ -1577,11 +1583,11 @@ impl EngineError {
     ///
     /// * `event_details`: Error linked event details.
     /// * `product_name`: Product name for which version is not supported.
-    /// * `raw_error`: Raw error message.
+    /// * `version`: unsupported version raw string.
     pub fn new_unsupported_version_error(
         event_details: EventDetails,
         product_name: String,
-        version: VersionsNumber,
+        version: String,
     ) -> EngineError {
         let message = format!(
             "Error, version `{}` is not supported for `{}`.",
@@ -1676,6 +1682,92 @@ impl EngineError {
             Some(raw_error),
             None,
             Some("Maybe there is a lag and cluster is not yet reported, please retry later.".to_string()),
+        )
+    }
+
+    /// Creates new error while trying to start a client service.
+    ///
+    /// Arguments:
+    ///
+    /// * `event_details`: Error linked event details.
+    /// * `service_id`: Client service ID.
+    /// * `service_name`: Client service name.
+    pub fn new_client_service_failed_to_start_error(
+        event_details: EventDetails,
+        service_id: String,
+        service_name: String,
+    ) -> EngineError {
+        // TODO(benjaminch): Service should probably passed otherwise, either inside event_details or via a new dedicated struct.
+        let message = format!("Service `{}` (id `{}`) failed to start. ⤬", service_name, service_id);
+
+        EngineError::new(
+            event_details,
+            Tag::ClientServiceFailedToStart,
+            message.to_string(),
+            message.to_string(),
+            None,
+            None,
+            Some("Ensure you can run it without issues with `qovery run` and check its logs from the web interface or the CLI with `qovery log`. \
+                This issue often occurs due to ports misconfiguration. Make sure you exposed the correct port (using EXPOSE statement in Dockerfile or via Qovery configuration).".to_string()),
+        )
+    }
+
+    /// Creates new error while trying to deploy a client service before start.
+    ///
+    /// Arguments:
+    ///
+    /// * `event_details`: Error linked event details.
+    /// * `service_id`: Client service ID.
+    /// * `service_name`: Client service name.
+    pub fn new_client_service_failed_to_deploy_before_start_error(
+        event_details: EventDetails,
+        service_id: String,
+        service_name: String,
+    ) -> EngineError {
+        // TODO(benjaminch): Service should probably passed otherwise, either inside event_details or via a new dedicated struct.
+        let message = format!(
+            "Service `{}` (id `{}`) failed to deploy (before start).",
+            service_name, service_id
+        );
+
+        EngineError::new(
+            event_details,
+            Tag::ClientServiceFailedToDeployBeforeStart,
+            message.to_string(),
+            message.to_string(),
+            None,
+            None,
+            None,
+        )
+    }
+
+    /// Creates new error while trying to start a client service before start.
+    ///
+    /// Arguments:
+    ///
+    /// * `event_details`: Error linked event details.
+    /// * `service_id`: Client service ID.
+    /// * `service_type`: Client service type.
+    /// * `raw_error`: Raw error message.
+    pub fn new_database_failed_to_start_after_several_retries(
+        event_details: EventDetails,
+        service_id: String,
+        service_type: String,
+        raw_error: Some(CommandError),
+    ) -> EngineError {
+        let message = format!(
+            "Database `{}` (id `{}`) failed to start after several retries.",
+            service_type, service_id
+        );
+
+        EngineError::new(
+            event_details,
+            Tag::DatabaseFailedToStartAfterSeveralRetries,
+            message.to_string(),
+            message.to_string(),
+            raw_error,
+            None,
+            None,
         )
     }
 }

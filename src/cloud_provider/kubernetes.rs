@@ -1841,7 +1841,7 @@ where
     let logger = kubernetes.logger().clone_dyn();
     let event_details = kubernetes
         .get_event_details(Stage::Infrastructure(InfrastructureStep::Create))
-        .clone(); // TODO(benjaminch): change the way event details is built, it's very dirty to make it mut and change the stage :(
+        .clone();
 
     let progress_info = ProgressInfo::new(
         ProgressScope::Infrastructure {
