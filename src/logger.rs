@@ -1,4 +1,4 @@
-use crate::events::EngineEvent;
+use crate::events::{EngineEvent, EventMessageVerbosity};
 use tracing;
 
 #[derive(Debug, Clone)]
@@ -63,10 +63,10 @@ impl Logger for StdIoLogger {
         )
         .in_scope(|| {
             match log_level {
-                LogLevel::Debug => debug!("{}", event.get_message()),
-                LogLevel::Info => info!("{}", event.get_message()),
-                LogLevel::Warning => warn!("{}", event.get_message()),
-                LogLevel::Error => error!("{}", event.get_message()),
+                LogLevel::Debug => debug!("{}", event.message(EventMessageVerbosity::FullDetails)),
+                LogLevel::Info => info!("{}", event.message(EventMessageVerbosity::FullDetails)),
+                LogLevel::Warning => warn!("{}", event.message(EventMessageVerbosity::FullDetails)),
+                LogLevel::Error => error!("{}", event.message(EventMessageVerbosity::FullDetails)),
             };
         });
     }
@@ -267,7 +267,7 @@ mod tests {
                 tc.description
             );
 
-            let message = tc.event.get_message().to_string();
+            let message = tc.event.message(EventMessageVerbosity::FullDetails).to_string();
             assert!(logs_contain(&message), "{}", tc.description);
         }
     }
