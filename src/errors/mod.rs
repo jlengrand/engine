@@ -7,34 +7,48 @@ use crate::error::{EngineError as LegacyEngineError, EngineErrorCause, EngineErr
 use crate::events::EventDetails;
 use url::Url;
 
+pub enum CommandErrorMessageVerbosity {
+    SafeOnly,
+    FullDetails,
+}
+
 /// CommandError: command error, mostly returned by third party tools.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CommandError {
-    /// message: full error message, can contains unsafe text such as passwords and tokens.
-    message_raw: String,
-    /// message_safe: error message omitting displaying any protected data such as passwords and tokens.
-    message_safe: Option<String>,
+    /// safe_message: error message omitting displaying any protected data such as passwords and tokens.
+    safe_message: String,
+    /// full_details: full error message, can contains unsafe text such as passwords and tokens.
+    full_details: Option<String>,
 }
 
 impl CommandError {
-    /// Returns CommandError message_raw. May contains unsafe text such as passwords and tokens.
-    pub fn message_raw(&self) -> String {
-        self.message_raw.to_string()
+    /// Returns CommandError full_details. May contains unsafe text such as passwords and tokens.
+    pub fn full_details(&self) -> Option<String> {
+        self.full_details.clone()
     }
 
-    /// Returns CommandError message_safe omitting all unsafe text such as passwords and tokens.
-    pub fn message_safe(&self) -> Option<String> {
-        self.message_safe.clone()
+    /// Returns CommandError safe_message omitting all unsafe text such as passwords and tokens.
+    pub fn safe_message(&self) -> String {
+        self.safe_message.to_string()
     }
 
-    /// Returns error all message (safe + unsafe).
-    pub fn message(&self) -> String {
-        // TODO(benjaminch): To be revamped, not sure how we should deal with safe and unsafe messages.
-        if let Some(msg) = &self.message_safe {
-            return format!("{} {}", msg, self.message_raw);
+    /// Returns message for command error.
+    ///
+    /// Arguments
+    ///
+    /// * `message_verbosity`: Which verbosity is required for the message.
+    pub fn message(&self, message_verbosity: CommandErrorMessageVerbosity) -> String {
+        match message_verbosity {
+            CommandErrorMessageVerbosity::SafeOnly => self.safe_message.to_string(),
+            CommandErrorMessageVerbosity::FullDetails => match &self.full_details {
+                None => self.safe_message.to_string(),
+                Some(details) => format!(
+                    "{} / Full error details: {}",
+                    self.safe_message.to_string(),
+                    details.to_string()
+                ),
+            },
         }
-
-        self.message_raw.to_string()
     }
 
     /// Creates a new CommandError from safe message. To be used when message is safe.
@@ -43,10 +57,10 @@ impl CommandError {
     }
 
     /// Creates a new CommandError having both a safe and an unsafe message.
-    pub fn new(message_raw: String, message_safe: Option<String>) -> Self {
+    pub fn new(safe_message: String, full_details: Option<String>, refactor: bool) -> Self {
         CommandError {
-            message_raw,
-            message_safe,
+            full_details,
+            safe_message,
         }
     }
 
@@ -77,7 +91,7 @@ impl CommandError {
             unsafe_message = format!("{}\nSTDERR {}", unsafe_message, txt);
         }
 
-        CommandError::new(unsafe_message, Some(message))
+        CommandError::new(message, Some(unsafe_message), true)
     }
 }
 
@@ -235,9 +249,9 @@ impl EngineError {
     }
 
     /// Returns proper error message.
-    pub fn message(&self) -> String {
+    pub fn message(&self, message_verbosity: CommandErrorMessageVerbosity) -> String {
         match &self.message {
-            Some(msg) => msg.message(),
+            Some(msg) => msg.message(message_verbosity),
             None => self.qovery_log_message.to_string(),
         }
     }
@@ -261,7 +275,7 @@ impl EngineError {
     /// * `qovery_log_message`: Error log message targeting Qovery team for investigation / monitoring purposes.
     /// * `user_log_message`: Error log message targeting Qovery user, avoiding any extending pointless details.
     /// * `error_message`: Raw error message.
-    /// * `raw_message_safe`: Error raw message such as command input / output where any unsafe data as been omitted (such as plain passwords / tokens).
+    /// * `raw_safe_message`: Error raw message such as command input / output where any unsafe data as been omitted (such as plain passwords / tokens).
     /// * `link`: Link documenting the given error.
     /// * `hint_message`: hint message aiming to give an hint to the user. For example: "Happens when application port has been changed but application hasn't been restarted.".
     fn new(
@@ -290,7 +304,7 @@ impl EngineError {
             EngineErrorCause::Internal,
             EngineErrorScope::from(self.event_details.transmitter()),
             self.event_details.execution_id().to_string(),
-            Some(self.message()),
+            Some(self.message(CommandErrorMessageVerbosity::FullDetails)), // Full details verbosity by default for legacy errors
         )
     }
 

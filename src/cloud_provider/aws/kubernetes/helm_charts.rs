@@ -6,7 +6,7 @@ use crate::cloud_provider::helm::{
 };
 use crate::cloud_provider::qovery::{get_qovery_app_version, EngineLocation, QoveryAgent, QoveryAppName, QoveryEngine};
 use crate::cmd::kubectl::{kubectl_delete_crash_looping_pods, kubectl_exec_get_daemonset, kubectl_exec_with_output};
-use crate::errors::CommandError;
+use crate::errors::{CommandError, CommandErrorMessageVerbosity};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
@@ -66,10 +66,10 @@ pub fn aws_helm_charts(
     let content_file = match File::open(&qovery_terraform_config_file) {
         Ok(x) => x,
         Err(e) => {
-            let message_safe = "Can't deploy helm chart as Qovery terraform config file has not been rendered by Terraform. Are you running it in dry run mode?";
             return Err(CommandError::new(
-                format!("{}, error: {:?}", message_safe.to_string(), e),
-                Some(message_safe.to_string()),
+                "Can't deploy helm chart as Qovery terraform config file has not been rendered by Terraform. Are you running it in dry run mode?".to_string(),
+                Some(e.to_string()),
+                true,
             ));
         }
     };
@@ -79,13 +79,13 @@ pub fn aws_helm_charts(
     let qovery_terraform_config: AwsQoveryTerraformConfig = match serde_json::from_reader(reader) {
         Ok(config) => config,
         Err(e) => {
-            let message_safe = format!(
-                "Error while parsing terraform config file {}",
-                qovery_terraform_config_file
-            );
             return Err(CommandError::new(
-                format!("{}, error: {:?}", message_safe.to_string(), e),
-                Some(message_safe.to_string()),
+                format!(
+                    "Error while parsing terraform config file {}",
+                    qovery_terraform_config_file
+                ),
+                Some(e.to_string()),
+                true,
             ));
         }
     };
@@ -1344,16 +1344,14 @@ impl AwsVpcCniChart {
                     _ => Ok(false),
                 },
             },
-            Err(e) => {
-                let message_safe = format!(
+            Err(e) => Err(CommandError::new(
+                format!(
                     "Error while getting daemonset info for chart {}, won't deploy CNI chart.",
                     &self.chart_info.name
-                );
-                Err(CommandError::new(
-                    format!("{}, error: {:?}", message_safe, e),
-                    Some(message_safe),
-                ))
-            }
+                ),
+                Some(e.message(CommandErrorMessageVerbosity::FullDetails)),
+                true,
+            )),
         }
     }
 

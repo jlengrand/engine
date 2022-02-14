@@ -33,7 +33,7 @@ use crate::cmd::terraform::{terraform_exec, terraform_init_validate_plan_apply, 
 use crate::deletion_utilities::{get_firsts_namespaces_to_delete, get_qovery_managed_namespaces};
 use crate::dns_provider;
 use crate::dns_provider::DnsProvider;
-use crate::errors::{CommandError, EngineError};
+use crate::errors::{CommandError, CommandErrorMessageVerbosity, EngineError};
 use crate::events::Stage::Infrastructure;
 use crate::events::{EngineEvent, EnvironmentStep, EventDetails, EventMessage, InfrastructureStep, Stage, Transmitter};
 use crate::logger::{LogLevel, Logger};
@@ -837,7 +837,10 @@ impl<'a> EKS<'a> {
                 LogLevel::Error,
                 EngineEvent::Deploying(
                     event_details.clone(),
-                    EventMessage::new("Error trying to get kubernetes events".to_string(), Some(err.message())),
+                    EventMessage::new(
+                        "Error trying to get kubernetes events".to_string(),
+                        Some(err.message(CommandErrorMessageVerbosity::FullDetails)),
+                    ),
                 ),
             ),
         };
@@ -971,10 +974,7 @@ impl<'a> EKS<'a> {
                                 for metric in metrics.items {
                                     match metric.value.parse::<i32>() {
                                         Ok(job_count) if job_count > 0 => current_engine_jobs += 1,
-                                        Err(e) => {
-                                            let safe_message = "Error while looking at the API metric value"; 
-                                            return OperationResult::Retry(EngineError::new_cannot_get_k8s_api_custom_metrics(event_details.clone(), CommandError::new(format!("{}, error: {}", safe_message, e.to_string()), Some(safe_message.to_string()))));
-                                        }
+                                        Err(e) => OperationResult::Retry(EngineError::new_cannot_get_k8s_api_custom_metrics(event_details.clone(), CommandError::new("Error while looking at the API metric value".to_string(), Some(e.to_string()), true))),
                                         _ => {}
                                     }
                                 }
@@ -1108,12 +1108,14 @@ impl<'a> EKS<'a> {
         let kubernetes_config_file_path = match self.get_kubeconfig_file_path() {
             Ok(x) => x,
             Err(e) => {
-                let safe_message = "Skipping Kubernetes uninstall because it can't be reached.";
                 self.logger().log(
                     LogLevel::Warning,
                     EngineEvent::Deleting(
                         event_details.clone(),
-                        EventMessage::new(safe_message.to_string(), Some(e.message())),
+                        EventMessage::new(
+                            "Skipping Kubernetes uninstall because it can't be reached.".to_string(),
+                            Some(e.message(CommandErrorMessageVerbosity::FullDetails)),
+                        ),
                     ),
                 );
 
@@ -1201,7 +1203,11 @@ impl<'a> EKS<'a> {
                                 ),
                             ),
                             Err(e) => {
-                                if !(e.message().contains("not found")) {
+                                if !(e
+                                    .message(CommandErrorMessageVerbosity::FullDetails)
+                                    .to_lowercase()
+                                    .contains("not found"))
+                                {
                                     self.logger().log(
                                         LogLevel::Error,
                                         EngineEvent::Deleting(
@@ -1218,15 +1224,17 @@ impl<'a> EKS<'a> {
                     }
                 }
                 Err(e) => {
-                    let message_safe = format!(
-                        "Error while getting all namespaces for Kubernetes cluster {}",
-                        self.name_with_id(),
-                    );
                     self.logger().log(
                         LogLevel::Error,
                         EngineEvent::Deleting(
                             event_details.clone(),
-                            EventMessage::new(message_safe, Some(e.message())),
+                            EventMessage::new(
+                                format!(
+                                    "Error while getting all namespaces for Kubernetes cluster {}",
+                                    self.name_with_id(),
+                                ),
+                                Some(e.message(CommandErrorMessageVerbosity::FullDetails)),
+                            ),
                         ),
                     );
                 }
@@ -1299,7 +1307,10 @@ impl<'a> EKS<'a> {
                                         LogLevel::Error,
                                         EngineEvent::Deleting(
                                             event_details.clone(),
-                                            EventMessage::new(message_safe, Some(e.message())),
+                                            EventMessage::new(
+                                                message_safe,
+                                                Some(e.message(CommandErrorMessageVerbosity::FullDetails)),
+                                            ),
                                         ),
                                     )
                                 }
@@ -1307,7 +1318,11 @@ impl<'a> EKS<'a> {
                         }
                     }
                     Err(e) => {
-                        if !(e.message().contains("not found")) {
+                        if !(e
+                            .message(CommandErrorMessageVerbosity::FullDetails)
+                            .to_lowercase()
+                            .contains("not found"))
+                        {
                             self.logger().log(
                                 LogLevel::Error,
                                 EngineEvent::Deleting(
@@ -1346,7 +1361,11 @@ impl<'a> EKS<'a> {
                         ),
                     ),
                     Err(e) => {
-                        if !(e.message().contains("not found")) {
+                        if !(e
+                            .message(CommandErrorMessageVerbosity::FullDetails)
+                            .to_lowercase()
+                            .contains("not found"))
+                        {
                             self.logger().log(
                                 LogLevel::Error,
                                 EngineEvent::Deleting(
@@ -1402,16 +1421,16 @@ impl<'a> EKS<'a> {
                         }
                     }
                 }
-                Err(e) => {
-                    let message_safe = "Unable to get helm list";
-                    self.logger().log(
-                        LogLevel::Error,
-                        EngineEvent::Deleting(
-                            event_details.clone(),
-                            EventMessage::new(message_safe.to_string(), Some(e.message())),
+                Err(e) => self.logger().log(
+                    LogLevel::Error,
+                    EngineEvent::Deleting(
+                        event_details.clone(),
+                        EventMessage::new(
+                            "Unable to get helm list".to_string(),
+                            Some(e.message(CommandErrorMessageVerbosity::FullDetails)),
                         ),
-                    )
-                }
+                    ),
+                ),
             }
         };
 
@@ -1456,7 +1475,7 @@ impl<'a> EKS<'a> {
             )),
             Err(retry::Error::Internal(msg)) => Err(EngineError::new_terraform_error_while_executing_destroy_pipeline(
                 event_details.clone(),
-                CommandError::new(msg, None),
+                CommandError::new_from_safe_message(msg),
             )),
         }
     }
