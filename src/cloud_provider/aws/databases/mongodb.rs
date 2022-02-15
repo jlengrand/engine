@@ -6,7 +6,7 @@ use tera::Context as TeraContext;
 use crate::cloud_provider::service::{
     check_service_version, default_tera_context, delete_stateful_service, deploy_stateful_service, get_tfstate_name,
     get_tfstate_suffix, scale_down_database, send_progress_on_long_task, Action, Create, Database, DatabaseOptions,
-    DatabaseType, Delete, Helm, Pause, Service, ServiceType, StatefulService, Terraform,
+    DatabaseType, Delete, Helm, Pause, Service, ServiceType, ServiceVersionCheckResult, StatefulService, Terraform,
 };
 use crate::cloud_provider::utilities::{
     generate_supported_version, get_self_hosted_mongodb_version, get_supported_version_to_use, print_action,
@@ -15,12 +15,13 @@ use crate::cloud_provider::DeploymentTarget;
 use crate::cmd::helm::Timeout;
 use crate::cmd::kubectl;
 use crate::errors::{CommandError, EngineError};
-use crate::events::{EnvironmentStep, Stage, ToTransmitter, Transmitter};
+use crate::events::{EnvironmentStep, EventDetails, Stage, ToTransmitter, Transmitter};
+use crate::logger::Logger;
 use crate::models::DatabaseMode::MANAGED;
 use crate::models::{Context, Listen, Listener, Listeners};
 use ::function_name::named;
 
-pub struct MongoDB {
+pub struct MongoDB<'a> {
     context: Context,
     id: String,
     action: Action,
@@ -33,9 +34,10 @@ pub struct MongoDB {
     database_instance_type: String,
     options: DatabaseOptions,
     listeners: Listeners,
+    logger: &'a dyn Logger,
 }
 
-impl MongoDB {
+impl<'a> MongoDB<'a> {
     pub fn new(
         context: Context,
         id: &str,
@@ -49,6 +51,7 @@ impl MongoDB {
         database_instance_type: &str,
         options: DatabaseOptions,
         listeners: Listeners,
+        logger: &'a dyn Logger,
     ) -> Self {
         MongoDB {
             context,
@@ -63,11 +66,20 @@ impl MongoDB {
             database_instance_type: database_instance_type.to_string(),
             options,
             listeners,
+            logger,
         }
     }
 
-    fn matching_correct_version(&self, is_managed_services: bool) -> Result<String, EngineError> {
-        check_service_version(get_mongodb_version(self.version(), is_managed_services), self)
+    fn matching_correct_version(
+        &self,
+        is_managed_services: bool,
+        event_details: EventDetails,
+    ) -> Result<ServiceVersionCheckResult, EngineError> {
+        check_service_version(
+            get_mongodb_version(self.version(), is_managed_services),
+            self,
+            event_details,
+        )
     }
 
     fn cloud_provider_name(&self) -> &str {
@@ -79,13 +91,13 @@ impl MongoDB {
     }
 }
 
-impl StatefulService for MongoDB {
+impl<'a> StatefulService for MongoDB<'a> {
     fn is_managed_service(&self) -> bool {
         self.options.mode == MANAGED
     }
 }
 
-impl Service for MongoDB {
+impl<'a> Service for MongoDB<'a> {
     fn context(&self) -> &Context {
         &self.context
     }
@@ -155,6 +167,7 @@ impl Service for MongoDB {
     }
 
     fn tera_context(&self, target: &DeploymentTarget) -> Result<TeraContext, EngineError> {
+        let event_details = self.get_event_details(Stage::Environment(EnvironmentStep::LoadConfiguration));
         let kubernetes = target.kubernetes;
         let environment = target.environment;
         let mut context = default_tera_context(self, target.kubernetes, target.environment);
@@ -172,7 +185,7 @@ impl Service for MongoDB {
 
         context.insert("namespace", environment.namespace());
 
-        let version = self.matching_correct_version(self.is_managed_service())?;
+        let version = self.matching_correct_version(self.is_managed_service(), event_details.clone())?;
         context.insert("version", &version);
 
         for (k, v) in kubernetes.cloud_provider().tera_context_environment_variables() {
@@ -217,14 +230,18 @@ impl Service for MongoDB {
         Ok(context)
     }
 
+    fn logger(&self) -> &dyn Logger {
+        self.logger
+    }
+
     fn selector(&self) -> Option<String> {
         Some(format!("app={}", self.sanitized_name()))
     }
 }
 
-impl Database for MongoDB {}
+impl<'a> Database for MongoDB<'a> {}
 
-impl ToTransmitter for MongoDB {
+impl<'a> ToTransmitter for MongoDB<'a> {
     fn to_transmitter(&self) -> Transmitter {
         Transmitter::Database(
             self.id().to_string(),
@@ -234,7 +251,7 @@ impl ToTransmitter for MongoDB {
     }
 }
 
-impl Helm for MongoDB {
+impl<'a> Helm for MongoDB<'a> {
     fn helm_selector(&self) -> Option<String> {
         self.selector()
     }
@@ -256,7 +273,7 @@ impl Helm for MongoDB {
     }
 }
 
-impl Terraform for MongoDB {
+impl<'a> Terraform for MongoDB<'a> {
     fn terraform_common_resource_dir_path(&self) -> String {
         format!("{}/aws/services/common", self.context.lib_root_dir())
     }
@@ -266,7 +283,7 @@ impl Terraform for MongoDB {
     }
 }
 
-impl Create for MongoDB {
+impl<'a> Create for MongoDB<'a> {
     #[named]
     fn on_create(&self, target: &DeploymentTarget) -> Result<(), EngineError> {
         let event_details = self.get_event_details(Stage::Environment(EnvironmentStep::Deploy));
@@ -278,7 +295,7 @@ impl Create for MongoDB {
         );
 
         send_progress_on_long_task(self, crate::cloud_provider::service::Action::Create, || {
-            deploy_stateful_service(target, self, event_details.clone())
+            deploy_stateful_service(target, self, event_details.clone(), self.logger)
         })
     }
 
@@ -298,7 +315,7 @@ impl Create for MongoDB {
     }
 }
 
-impl Pause for MongoDB {
+impl<'a> Pause for MongoDB<'a> {
     #[named]
     fn on_pause(&self, target: &DeploymentTarget) -> Result<(), EngineError> {
         print_action(
@@ -330,7 +347,7 @@ impl Pause for MongoDB {
     }
 }
 
-impl Delete for MongoDB {
+impl<'a> Delete for MongoDB<'a> {
     #[named]
     fn on_delete(&self, target: &DeploymentTarget) -> Result<(), EngineError> {
         let event_details = self.get_event_details(Stage::Environment(EnvironmentStep::Delete));
@@ -342,7 +359,7 @@ impl Delete for MongoDB {
         );
 
         send_progress_on_long_task(self, crate::cloud_provider::service::Action::Delete, || {
-            delete_stateful_service(target, self, event_details.clone())
+            delete_stateful_service(target, self, event_details.clone(), self.logger)
         })
     }
 
@@ -362,7 +379,7 @@ impl Delete for MongoDB {
     }
 }
 
-impl Listen for MongoDB {
+impl<'a> Listen for MongoDB<'a> {
     fn listeners(&self) -> &Listeners {
         &self.listeners
     }
@@ -398,6 +415,7 @@ fn get_managed_mongodb_version(requested_version: String) -> Result<String, Comm
 mod tests_mongodb {
     use crate::cloud_provider::aws::databases::mongodb::{get_mongodb_version, MongoDB};
     use crate::cloud_provider::service::{Action, DatabaseOptions, Service};
+    use crate::logger::StdIoLogger;
     use crate::models::{Context, DatabaseMode};
 
     #[test]
@@ -458,6 +476,7 @@ mod tests_mongodb {
                 publicly_accessible: false,
             },
             vec![],
+            &StdIoLogger::new(),
         );
         assert_eq!(database.sanitized_name(), db_expected_name);
     }

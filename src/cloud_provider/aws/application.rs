@@ -1,6 +1,7 @@
 use tera::Context as TeraContext;
 
 use crate::build_platform::Image;
+use crate::cloud_provider::kubernetes::validate_k8s_required_cpu_and_burstable;
 use crate::cloud_provider::models::{
     EnvironmentVariable, EnvironmentVariableDataTemplate, Storage, StorageDataTemplate,
 };
@@ -9,17 +10,18 @@ use crate::cloud_provider::service::{
     scale_down_application, send_progress_on_long_task, Action, Application as CApplication, Create, Delete, Helm,
     Pause, Service, ServiceType, StatelessService,
 };
-use crate::cloud_provider::utilities::{print_action, sanitize_name, validate_k8s_required_cpu_and_burstable};
+use crate::cloud_provider::utilities::{print_action, sanitize_name};
 use crate::cloud_provider::DeploymentTarget;
 use crate::cmd::helm::Timeout;
 use crate::cmd::kubectl::ScalingKind::{Deployment, Statefulset};
 use crate::error::EngineErrorCause::Internal;
 use crate::error::{EngineError, EngineErrorScope};
 use crate::events::{EnvironmentStep, Stage, ToTransmitter, Transmitter};
+use crate::logger::Logger;
 use crate::models::{Context, Listen, Listener, Listeners, ListenersHelper, Port};
 use ::function_name::named;
 
-pub struct Application {
+pub struct Application<'a> {
     context: Context,
     id: String,
     action: Action,
@@ -35,9 +37,10 @@ pub struct Application {
     storage: Vec<Storage<StorageType>>,
     environment_variables: Vec<EnvironmentVariable>,
     listeners: Listeners,
+    logger: &'a dyn Logger,
 }
 
-impl Application {
+impl<'a> Application<'a> {
     pub fn new(
         context: Context,
         id: &str,
@@ -54,6 +57,7 @@ impl Application {
         storage: Vec<Storage<StorageType>>,
         environment_variables: Vec<EnvironmentVariable>,
         listeners: Listeners,
+        logger: &dyn Logger,
     ) -> Self {
         Application {
             context,
@@ -71,6 +75,7 @@ impl Application {
             storage,
             environment_variables,
             listeners,
+            logger,
         }
     }
 
@@ -248,6 +253,7 @@ impl Service for Application {
                 ));
             }
         };
+
         context.insert("cpu_burst", &cpu_limits.cpu_limit);
 
         let storage = self
@@ -284,6 +290,10 @@ impl Service for Application {
         }
 
         Ok(context)
+    }
+
+    fn logger(&self) -> &dyn Logger {
+        todo!()
     }
 
     fn selector(&self) -> Option<String> {

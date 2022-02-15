@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use crate::cloud_provider::aws::regions::AwsZones;
 use crate::cloud_provider::environment::Environment;
 use crate::cloud_provider::models::NodeGroups;
+use crate::cloud_provider::models::{CpuLimits, NodeGroups};
 use crate::cloud_provider::service::CheckAction;
 use crate::cloud_provider::utilities::VersionsNumber;
 use crate::cloud_provider::{service, CloudProvider, DeploymentTarget};
@@ -387,7 +388,7 @@ pub fn deploy_environment(
     // Resources check before deploy
     // TODO(ENG-1066): we should check if env can be deployed or not based on required resources and available ones.
     // This check is not trivial since auto-scaler comes to play and resources distribution on nodes might not behave necesarly the way we think.
-    // do not deploy if there is not enough resources
+    let resources = kubernetes.resources(environment)?;
 
     // create all stateful services (database)
     for service in &environment.stateful_services {
@@ -725,8 +726,12 @@ where
                 EngineEvent::Deleting(
                     event_details.clone(),
                     EventMessage::new(
-                        format!("Encountering issues while trying to get objects kind {}.", object,),
-                        Some(e.message()),
+                        format!(
+                            "Encountering issues while trying to get objects kind {}: {:?}",
+                            object,
+                            e.message()
+                        ),
+                        None,
                     ),
                 ),
             );
@@ -743,10 +748,7 @@ where
                         LogLevel::Warning,
                         EngineEvent::Deleting(
                             event_details.clone(),
-                            EventMessage::new_from_safe(format!(
-                                "Failed to delete all {} objects, retrying...",
-                                object,
-                            )),
+                            EventMessage::new(format!("Failed to delete all {} objects, retrying...", object,), None),
                         ),
                     );
                     OperationResult::Retry(e)
@@ -1200,35 +1202,212 @@ impl NodeGroups {
     }
 }
 
+/// TODO(benjaminch): to be refactored with similar function in services.rs
+/// This function call (start|pause|delete)_in_progress function every 10 seconds when a
+/// long blocking task is running.
+pub fn send_progress_on_long_task<K, R, F>(kubernetes: &K, action: Action, long_task: F) -> R
+where
+    K: Kubernetes + Listen,
+    F: Fn() -> R,
+{
+    let waiting_message = match action {
+        Action::Create => Some(format!(
+            "Infrastructure '{}' deployment is in progress...",
+            kubernetes.name_with_id()
+        )),
+        Action::Pause => Some(format!(
+            "Infrastructure '{}' pause is in progress...",
+            kubernetes.name_with_id()
+        )),
+        Action::Delete => Some(format!(
+            "Infrastructure '{}' deletion is in progress...",
+            kubernetes.name_with_id()
+        )),
+        Action::Nothing => None,
+    };
+
+    send_progress_on_long_task_with_message(kubernetes, waiting_message, action, long_task)
+}
+
+/// TODO(benjaminch): to be refactored with similar function in services.rs
+/// This function call (start|pause|delete)_in_progress function every 10 seconds when a
+/// long blocking task is running.
+pub fn send_progress_on_long_task_with_message<K, R, F>(
+    kubernetes: &K,
+    waiting_message: Option<String>,
+    action: Action,
+    long_task: F,
+) -> R
+where
+    K: Kubernetes + Listen,
+    F: Fn() -> R,
+{
+    let listeners = std::clone::Clone::clone(kubernetes.listeners());
+    let logger = kubernetes.logger().clone_dyn();
+    let event_details = kubernetes
+        .get_event_details(Stage::Infrastructure(InfrastructureStep::Create))
+        .clone();
+
+    let progress_info = ProgressInfo::new(
+        ProgressScope::Infrastructure {
+            execution_id: kubernetes.context().execution_id().to_string(),
+        },
+        Info,
+        waiting_message.clone(),
+        kubernetes.context().execution_id(),
+    );
+
+    let (tx, rx) = mpsc::channel();
+
+    // monitor thread to notify user while the blocking task is executed
+    let _ = std::thread::Builder::new()
+        .name("task-monitor".to_string())
+        .spawn(move || {
+            // stop the thread when the blocking task is done
+            let listeners_helper = ListenersHelper::new(&listeners);
+            let action = action;
+            let progress_info = progress_info;
+            let waiting_message = waiting_message.unwrap_or("no message ...".to_string());
+
+            loop {
+                // do notify users here
+                let progress_info = std::clone::Clone::clone(&progress_info);
+                let event_details = std::clone::Clone::clone(&event_details);
+                let event_message = EventMessage::new_from_safe(waiting_message.to_string());
+
+                match action {
+                    Action::Create => {
+                        listeners_helper.deployment_in_progress(progress_info);
+                        logger.log(
+                            LogLevel::Info,
+                            EngineEvent::Deploying(
+                                EventDetails::clone_changing_stage(
+                                    event_details,
+                                    Stage::Infrastructure(InfrastructureStep::Create),
+                                ),
+                                event_message,
+                            ),
+                        );
+                    }
+                    Action::Pause => {
+                        listeners_helper.pause_in_progress(progress_info);
+                        logger.log(
+                            LogLevel::Info,
+                            EngineEvent::Pausing(
+                                EventDetails::clone_changing_stage(
+                                    event_details,
+                                    Stage::Infrastructure(InfrastructureStep::Pause),
+                                ),
+                                event_message,
+                            ),
+                        );
+                    }
+                    Action::Delete => {
+                        listeners_helper.delete_in_progress(progress_info);
+                        logger.log(
+                            LogLevel::Info,
+                            EngineEvent::Deleting(
+                                EventDetails::clone_changing_stage(
+                                    event_details,
+                                    Stage::Infrastructure(InfrastructureStep::Delete),
+                                ),
+                                event_message,
+                            ),
+                        );
+                    }
+                    Action::Nothing => {} // should not happens
+                };
+
+                thread::sleep(Duration::from_secs(10));
+
+                // watch for thread termination
+                match rx.try_recv() {
+                    Ok(_) | Err(TryRecvError::Disconnected) => break,
+                    Err(TryRecvError::Empty) => {}
+                }
+            }
+        });
+
+    let blocking_task_result = long_task();
+    let _ = tx.send(());
+
+    blocking_task_result
+}
+
+pub fn validate_k8s_required_cpu_and_burstable(
+    listener_helper: &ListenersHelper,
+    execution_id: &str,
+    context_id: &str,
+    total_cpu: String,
+    cpu_burst: String,
+) -> Result<CpuLimits, CommandError> {
+    let total_cpu_float = convert_k8s_cpu_value_to_f32(total_cpu.clone())?;
+    let cpu_burst_float = convert_k8s_cpu_value_to_f32(cpu_burst.clone())?;
+    let mut set_cpu_burst = cpu_burst.clone();
+
+    if cpu_burst_float < total_cpu_float {
+        let message = format!(
+            "CPU burst value '{}' was lower than the desired total of CPUs {}, using burstable value. Please ensure your configuration is valid",
+            cpu_burst,
+            total_cpu,
+        );
+
+        listener_helper.error(ProgressInfo::new(
+            ProgressScope::Environment {
+                id: execution_id.to_string(),
+            },
+            ProgressLevel::Warn,
+            Some(message),
+            context_id,
+        ));
+
+        set_cpu_burst = total_cpu.clone();
+    }
+
+    Ok(CpuLimits {
+        cpu_limit: set_cpu_burst,
+        cpu_request: total_cpu,
+    })
+}
+
+pub fn convert_k8s_cpu_value_to_f32(value: String) -> Result<f32, CommandError> {
+    if value.ends_with('m') {
+        let mut value_number_string = value;
+        value_number_string.pop();
+        return match value_number_string.parse::<f32>() {
+            Ok(n) => {
+                Ok(n * 0.001) // return in milli cpu the value
+            }
+            Err(e) => Err(CommandError::new(
+                e.to_string(),
+                Some(format!("Error while trying to parse `{}` to float 32.", m.as_str())),
+            )),
+        };
+    }
+
+    match value.parse::<f32>() {
+        Ok(n) => Ok(n),
+        Err(e) => Err(CommandError::new(
+            e.to_string(),
+            Some(format!("Error while trying to parse `{}` to float 32.", m.as_str())),
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
 
     use crate::cloud_provider::kubernetes::{
-        check_kubernetes_upgrade_status, compare_kubernetes_cluster_versions_for_upgrade, KubernetesNodesType,
+        check_kubernetes_upgrade_status, compare_kubernetes_cluster_versions_for_upgrade, convert_k8s_cpu_value_to_f32,
+        validate_k8s_required_cpu_and_burstable, KubernetesNodesType,
     };
+    use crate::cloud_provider::models::CpuLimits;
     use crate::cloud_provider::utilities::VersionsNumber;
     use crate::cmd::structs::{KubernetesList, KubernetesNode, KubernetesVersion};
     use crate::events::{EngineEvent, EventDetails, InfrastructureStep, Stage, Transmitter};
     use crate::logger::{LogLevel, Logger};
-    use crate::models::QoveryIdentifier;
-
-    #[derive(Clone)]
-    struct FakeLogger {}
-
-    impl FakeLogger {
-        pub fn new() -> Self {
-            FakeLogger {}
-        }
-    }
-
-    impl Logger for FakeLogger {
-        fn log(&self, _log_level: LogLevel, _event: EngineEvent) {}
-
-        fn clone_dyn(&self) -> Box<dyn Logger> {
-            Box::new(self.clone())
-        }
-    }
+    use crate::models::{ListenersHelper, QoveryIdentifier};
 
     #[test]
     pub fn check_kubernetes_upgrade_method() {
@@ -1795,136 +1974,43 @@ mod tests {
             }
         }
     }
-}
 
-/// TODO(benjaminch): to be refactored with similar function in services.rs
-/// This function call (start|pause|delete)_in_progress function every 10 seconds when a
-/// long blocking task is running.
-pub fn send_progress_on_long_task<K, R, F>(kubernetes: &K, action: Action, long_task: F) -> R
-where
-    K: Kubernetes + Listen,
-    F: Fn() -> R,
-{
-    let waiting_message = match action {
-        Action::Create => Some(format!(
-            "Infrastructure '{}' deployment is in progress...",
-            kubernetes.name_with_id()
-        )),
-        Action::Pause => Some(format!(
-            "Infrastructure '{}' pause is in progress...",
-            kubernetes.name_with_id()
-        )),
-        Action::Delete => Some(format!(
-            "Infrastructure '{}' deletion is in progress...",
-            kubernetes.name_with_id()
-        )),
-        Action::Nothing => None,
-    };
+    #[test]
+    pub fn test_k8s_milli_cpu_convert() {
+        let milli_cpu = "250m".to_string();
+        let int_cpu = "2".to_string();
 
-    send_progress_on_long_task_with_message(kubernetes, waiting_message, action, long_task)
-}
+        assert_eq!(convert_k8s_cpu_value_to_f32(milli_cpu).unwrap(), 0.25 as f32);
+        assert_eq!(convert_k8s_cpu_value_to_f32(int_cpu).unwrap(), 2 as f32);
+    }
 
-/// TODO(benjaminch): to be refactored with similar function in services.rs
-/// This function call (start|pause|delete)_in_progress function every 10 seconds when a
-/// long blocking task is running.
-pub fn send_progress_on_long_task_with_message<K, R, F>(
-    kubernetes: &K,
-    waiting_message: Option<String>,
-    action: Action,
-    long_task: F,
-) -> R
-where
-    K: Kubernetes + Listen,
-    F: Fn() -> R,
-{
-    let listeners = std::clone::Clone::clone(kubernetes.listeners());
-    let logger = kubernetes.logger().clone_dyn();
-    let event_details = kubernetes
-        .get_event_details(Stage::Infrastructure(InfrastructureStep::Create))
-        .clone();
+    #[test]
+    pub fn test_cpu_set() {
+        let v = vec![];
+        let listener_helper = ListenersHelper::new(&v);
+        let execution_id = "execution_id";
+        let context_id = "context_id";
 
-    let progress_info = ProgressInfo::new(
-        ProgressScope::Infrastructure {
-            execution_id: kubernetes.context().execution_id().to_string(),
-        },
-        Info,
-        waiting_message.clone(),
-        kubernetes.context().execution_id(),
-    );
-
-    let (tx, rx) = mpsc::channel();
-
-    // monitor thread to notify user while the blocking task is executed
-    let _ = std::thread::Builder::new()
-        .name("task-monitor".to_string())
-        .spawn(move || {
-            // stop the thread when the blocking task is done
-            let listeners_helper = ListenersHelper::new(&listeners);
-            let action = action;
-            let progress_info = progress_info;
-            let waiting_message = waiting_message.unwrap_or("no message ...".to_string());
-
-            loop {
-                // do notify users here
-                let progress_info = std::clone::Clone::clone(&progress_info);
-                let event_details = std::clone::Clone::clone(&event_details);
-                let event_message = EventMessage::new_from_safe(waiting_message.to_string());
-
-                match action {
-                    Action::Create => {
-                        listeners_helper.deployment_in_progress(progress_info);
-                        logger.log(
-                            LogLevel::Info,
-                            EngineEvent::Deploying(
-                                EventDetails::clone_changing_stage(
-                                    event_details,
-                                    Stage::Infrastructure(InfrastructureStep::Create),
-                                ),
-                                event_message,
-                            ),
-                        );
-                    }
-                    Action::Pause => {
-                        listeners_helper.pause_in_progress(progress_info);
-                        logger.log(
-                            LogLevel::Info,
-                            EngineEvent::Pausing(
-                                EventDetails::clone_changing_stage(
-                                    event_details,
-                                    Stage::Infrastructure(InfrastructureStep::Pause),
-                                ),
-                                event_message,
-                            ),
-                        );
-                    }
-                    Action::Delete => {
-                        listeners_helper.delete_in_progress(progress_info);
-                        logger.log(
-                            LogLevel::Info,
-                            EngineEvent::Deleting(
-                                EventDetails::clone_changing_stage(
-                                    event_details,
-                                    Stage::Infrastructure(InfrastructureStep::Delete),
-                                ),
-                                event_message,
-                            ),
-                        );
-                    }
-                    Action::Nothing => {} // should not happens
-                };
-
-                thread::sleep(Duration::from_secs(10));
-
-                // watch for thread termination
-                match rx.try_recv() {
-                    Ok(_) | Err(TryRecvError::Disconnected) => break,
-                    Err(TryRecvError::Empty) => {}
-                }
+        let mut total_cpu = "0.25".to_string();
+        let mut cpu_burst = "1".to_string();
+        assert_eq!(
+            validate_k8s_required_cpu_and_burstable(&listener_helper, execution_id, context_id, total_cpu, cpu_burst)
+                .unwrap(),
+            CpuLimits {
+                cpu_request: "0.25".to_string(),
+                cpu_limit: "1".to_string()
             }
-        });
+        );
 
-    let blocking_task_result = long_task();
-    let _ = tx.send(());
-
-    blocking_task_result
+        total_cpu = "1".to_string();
+        cpu_burst = "0.5".to_string();
+        assert_eq!(
+            validate_k8s_required_cpu_and_burstable(&listener_helper, execution_id, context_id, total_cpu, cpu_burst)
+                .unwrap(),
+            CpuLimits {
+                cpu_request: "1".to_string(),
+                cpu_limit: "1".to_string()
+            }
+        );
+    }
 }

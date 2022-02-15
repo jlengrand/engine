@@ -6,14 +6,15 @@ use tera::Context as TeraContext;
 use crate::cloud_provider::service::{
     check_service_version, default_tera_context, delete_stateful_service, deploy_stateful_service, get_tfstate_name,
     get_tfstate_suffix, scale_down_database, send_progress_on_long_task, Action, Create, Database, DatabaseOptions,
-    DatabaseType, Delete, Helm, Pause, Service, ServiceType, StatefulService, Terraform,
+    DatabaseType, Delete, Helm, Pause, Service, ServiceType, ServiceVersionCheckResult, StatefulService, Terraform,
 };
 use crate::cloud_provider::utilities::{get_self_hosted_redis_version, get_supported_version_to_use, print_action};
 use crate::cloud_provider::DeploymentTarget;
 use crate::cmd::helm::Timeout;
 use crate::cmd::kubectl;
-use crate::error::{EngineError, EngineErrorCause, EngineErrorScope, StringError};
-use crate::events::{EnvironmentStep, Stage, ToTransmitter, Transmitter};
+use crate::error::EngineErrorScope::Engine;
+use crate::errors::{CommandError, EngineError};
+use crate::events::{EnvironmentStep, EventDetails, Stage, ToTransmitter, Transmitter};
 use crate::models::DatabaseMode::MANAGED;
 use crate::models::{Context, Listen, Listener, Listeners};
 use ::function_name::named;
@@ -64,8 +65,16 @@ impl Redis {
         }
     }
 
-    fn matching_correct_version(&self, is_managed_services: bool) -> Result<String, EngineError> {
-        check_service_version(get_redis_version(self.version(), is_managed_services), self)
+    fn matching_correct_version(
+        &self,
+        is_managed_services: bool,
+        event_details: EventDetails,
+    ) -> Result<ServiceVersionCheckResult, EngineError> {
+        check_service_version(
+            get_redis_version(self.version(), is_managed_services),
+            self,
+            event_details,
+        )
     }
 
     fn cloud_provider_name(&self) -> &str {
@@ -164,17 +173,14 @@ impl Service for Redis {
     }
 
     fn tera_context(&self, target: &DeploymentTarget) -> Result<TeraContext, EngineError> {
+        let event_details = self.get_event_details(Stage::Environment(EnvironmentStep::LoadConfiguration));
         let kubernetes = target.kubernetes;
         let environment = target.environment;
         let mut context = default_tera_context(self, kubernetes, environment);
 
         // we need the kubernetes config file to store tfstates file in kube secrets
-        let kube_config_file_path = match kubernetes.get_kubeconfig_file_path() {
-            Ok(path) => path,
-            Err(e) => {
-                return Err(e.to_legacy_engine_error());
-            }
-        };
+        let kube_config_file_path = kubernetes.get_kubeconfig_file_path()?;
+
         context.insert("kubeconfig_path", &kube_config_file_path);
 
         kubectl::kubectl_exec_create_namespace_without_labels(
@@ -183,23 +189,27 @@ impl Service for Redis {
             kubernetes.cloud_provider().credentials_environment_variables(),
         );
 
-        let version = self.matching_correct_version(self.is_managed_service())?;
+        let version = self
+            .matching_correct_version(self.is_managed_service(), event_details.clone())?
+            .matched_version();
 
         let parameter_group_name = if version.starts_with("5.") {
             "default.redis5.0"
         } else if version.starts_with("6.") {
             "default.redis6.x"
         } else {
-            return Err(self.engine_error(
-                EngineErrorCause::Internal,
-                "Elasticache parameter group name unknown".to_string(),
+            return Err(EngineError::new_terraform_unsupported_context_parameter_value(
+                event_details.clone(),
+                "Elasicache".to_string(),
+                "database_elasticache_parameter_group_name".to_string(),
+                format!("default.redis{}", version),
             ));
         };
 
         context.insert("database_elasticache_parameter_group_name", parameter_group_name);
 
         context.insert("namespace", environment.namespace());
-        context.insert("version", &version);
+        context.insert("version", version.as_str());
 
         for (k, v) in kubernetes.cloud_provider().tera_context_environment_variables() {
             context.insert(k, v);
@@ -243,14 +253,6 @@ impl Service for Redis {
 
     fn selector(&self) -> Option<String> {
         Some(format!("app={}", self.sanitized_name()))
-    }
-
-    fn engine_error_scope(&self) -> EngineErrorScope {
-        EngineErrorScope::Database(
-            self.id().to_string(),
-            self.service_type().name().to_string(),
-            self.name().to_string(),
-        )
     }
 }
 
@@ -300,7 +302,7 @@ impl Create for Redis {
         );
 
         send_progress_on_long_task(self, crate::cloud_provider::service::Action::Create, || {
-            deploy_stateful_service(target, self, event_details.clone())
+            deploy_stateful_service(target, self, event_details.clone(), self.logger())
         })
     }
 
@@ -364,7 +366,7 @@ impl Delete for Redis {
         );
 
         send_progress_on_long_task(self, crate::cloud_provider::service::Action::Delete, || {
-            delete_stateful_service(target, self, event_details.clone())
+            delete_stateful_service(target, self, event_details.clone(), self.logger())
         })
     }
 
@@ -394,7 +396,7 @@ impl Listen for Redis {
     }
 }
 
-fn get_redis_version(requested_version: String, is_managed_service: bool) -> Result<String, StringError> {
+fn get_redis_version(requested_version: String, is_managed_service: bool) -> Result<String, CommandError> {
     if is_managed_service {
         get_managed_redis_version(requested_version)
     } else {
@@ -402,7 +404,7 @@ fn get_redis_version(requested_version: String, is_managed_service: bool) -> Res
     }
 }
 
-fn get_managed_redis_version(requested_version: String) -> Result<String, StringError> {
+fn get_managed_redis_version(requested_version: String) -> Result<String, CommandError> {
     let mut supported_redis_versions = HashMap::with_capacity(2);
     // https://docs.aws.amazon.com/AmazonElastiCache/latest/red-ug/supported-engine-versions.html
 

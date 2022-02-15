@@ -926,12 +926,12 @@ where
 
 pub struct ServiceVersionCheckResult {
     requested_version: String,
-    matched_version: Option<String>,
+    matched_version: String,
     message: Option<String>,
 }
 
 impl ServiceVersionCheckResult {
-    pub fn new(requested_version: String, matched_version: Option<String>, message: Option<String>) -> Self {
+    pub fn new(requested_version: String, matched_version: String, message: Option<String>) -> Self {
         ServiceVersionCheckResult {
             requested_version,
             matched_version,
@@ -939,8 +939,8 @@ impl ServiceVersionCheckResult {
         }
     }
 
-    pub fn matched_version(&self) -> Option<String> {
-        self.matched_version.clone()
+    pub fn matched_version(&self) -> String {
+        self.matched_version.to_string()
     }
 
     pub fn message(&self) -> Option<String> {
@@ -979,14 +979,14 @@ where
 
                 return Ok(ServiceVersionCheckResult::new(
                     service.version(),
-                    Some(version.to_string()),
+                    version.to_string(),
                     Some(message.to_string()),
                 ));
             }
 
             Ok(ServiceVersionCheckResult::new(
                 service.version(),
-                Some(version.to_string()),
+                version.to_string(),
                 None,
             ))
         }
@@ -1148,7 +1148,7 @@ where
 
             return Err(EngineError::new_k8s_service_issue(
                 event_details.clone(),
-                CommandError::new(err.message.unwrap_or("No error message.".to_string()), None),
+                CommandError::new(err.message(), Some("Error with Kubernetes service".to_string())),
             ));
         }
         _ => {
@@ -1191,10 +1191,7 @@ where
 {
     let selector = service.selector().unwrap_or("".to_string());
     let mut result = Vec::with_capacity(50);
-    let kubernetes_config_file_path = match kubernetes.get_kubeconfig_file_path() {
-        Ok(path) => path,
-        Err(e) => return Err(e.to_legacy_engine_error()),
-    };
+    let kubernetes_config_file_path = kubernetes.get_kubeconfig_file_path()?;
 
     // get logs
     let logs = crate::cmd::kubectl::kubectl_exec_logs(

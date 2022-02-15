@@ -23,6 +23,7 @@ pub enum EngineEvent {
     },
     Error {
         error: EngineError,
+        message: Option<EventMessage>,
     },
     #[deprecated(note = "event status is carried by EventDetails directly")]
     Waiting {
@@ -76,7 +77,7 @@ impl From<events::EngineEvent> for EngineEvent {
                 details: EventDetails::from(d),
                 message: EventMessage::from(m),
             },
-            events::EngineEvent::Error(e) => EngineEvent::Error {
+            events::EngineEvent::Error(e, m) => EngineEvent::Error {
                 error: EngineError::from(e),
             },
             events::EngineEvent::Waiting(d, m) => EngineEvent::Waiting {

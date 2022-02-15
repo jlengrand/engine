@@ -8,13 +8,13 @@ use crate::cloud_provider::service::{
 use crate::cloud_provider::utilities::{check_cname_for, print_action, sanitize_name};
 use crate::cloud_provider::DeploymentTarget;
 use crate::cmd::helm::Timeout;
-use crate::error::{EngineError, EngineErrorCause, EngineErrorScope};
-use crate::errors::EngineError as NewEngineError;
+use crate::errors::EngineError;
 use crate::events::{EnvironmentStep, Stage, ToTransmitter, Transmitter};
+use crate::logger::Logger;
 use crate::models::{Context, Listen, Listener, Listeners};
 use ::function_name::named;
 
-pub struct Router {
+pub struct Router<'a> {
     context: Context,
     id: String,
     name: String,
@@ -24,9 +24,10 @@ pub struct Router {
     sticky_sessions_enabled: bool,
     routes: Vec<Route>,
     listeners: Listeners,
+    logger: &'a dyn Logger,
 }
 
-impl Router {
+impl<'a> Router<'a> {
     pub fn new(
         context: Context,
         id: &str,
@@ -37,6 +38,7 @@ impl Router {
         routes: Vec<Route>,
         sticky_sessions_enabled: bool,
         listeners: Listeners,
+        logger: &'a dyn Logger,
     ) -> Self {
         Router {
             context,
@@ -48,6 +50,7 @@ impl Router {
             sticky_sessions_enabled,
             routes,
             listeners,
+            logger,
         }
     }
 
@@ -60,7 +63,7 @@ impl Router {
     }
 }
 
-impl Service for Router {
+impl<'a> Service for Router<'a> {
     fn context(&self) -> &Context {
         &self.context
     }
@@ -175,10 +178,7 @@ impl Service for Router {
         context.insert("nginx_limit_cpu", "200m");
         context.insert("nginx_limit_memory", "128Mi");
 
-        let kubernetes_config_file_path = match kubernetes.get_kubeconfig_file_path() {
-            Ok(path) => path,
-            Err(e) => return Err(e.to_legacy_engine_error()),
-        };
+        let kubernetes_config_file_path = kubernetes.get_kubeconfig_file_path()?;
 
         // Default domain
         match crate::cmd::kubectl::kubectl_exec_get_external_ingress_hostname(
@@ -222,12 +222,12 @@ impl Service for Router {
         Ok(context)
     }
 
-    fn selector(&self) -> Option<String> {
-        Some(format!("routerId={}", self.id))
+    fn logger(&self) -> &dyn Logger {
+        self.logger
     }
 
-    fn engine_error_scope(&self) -> EngineErrorScope {
-        EngineErrorScope::Router(self.id().to_string(), self.name().to_string())
+    fn selector(&self) -> Option<String> {
+        Some(format!("routerId={}", self.id))
     }
 }
 
@@ -302,10 +302,7 @@ impl Create for Router {
         let workspace_dir = self.workspace_directory();
         let helm_release_name = self.helm_release_name();
 
-        let kubernetes_config_file_path = match kubernetes.get_kubeconfig_file_path() {
-            Ok(p) => p,
-            Err(e) => return Err(e.to_legacy_engine_error()),
-        };
+        let kubernetes_config_file_path = kubernetes.get_kubeconfig_file_path()?;
 
         // respect order - getting the context here and not before is mandatory
         // the nginx-ingress must be available to get the external dns target if necessary
@@ -315,13 +312,12 @@ impl Create for Router {
         if let Err(e) =
             crate::template::generate_and_copy_all_files_into_dir(from_dir.as_str(), workspace_dir.as_str(), context)
         {
-            return Err(NewEngineError::new_cannot_copy_files_from_one_directory_to_another(
+            return Err(EngineError::new_cannot_copy_files_from_one_directory_to_another(
                 event_details.clone(),
                 from_dir.to_string(),
                 workspace_dir.to_string(),
                 e,
-            )
-            .to_legacy_engine_error());
+            ));
         }
 
         // do exec helm upgrade and return the last deployment status
@@ -335,12 +331,10 @@ impl Create for Router {
             kubernetes.cloud_provider().credentials_environment_variables(),
             self.service_type(),
         )
-        .map_err(|e| {
-            NewEngineError::new_helm_charts_upgrade_error(event_details.clone(), e).to_legacy_engine_error()
-        })?;
+        .map_err(|e| EngineError::new_helm_charts_upgrade_error(event_details.clone(), e))?;
 
         if helm_history_row.is_none() || !helm_history_row.unwrap().is_successfully_deployed() {
-            return Err(self.engine_error(EngineErrorCause::Internal, "Router has failed to be deployed".into()));
+            return Err(EngineError::new_router_failed_to_deploy(event_details.clone()));
         }
 
         Ok(())

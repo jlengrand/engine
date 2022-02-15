@@ -15,7 +15,7 @@ use crate::cloud_provider::utilities::{
 use crate::cloud_provider::DeploymentTarget;
 use crate::cmd::helm::Timeout;
 use crate::cmd::kubectl;
-use crate::error::{EngineError, EngineErrorScope, StringError};
+use crate::errors::EngineError;
 use crate::events::{EnvironmentStep, Stage, ToTransmitter, Transmitter};
 use crate::models::DatabaseMode::MANAGED;
 use crate::models::{Context, Listen, Listener, Listeners};
@@ -231,14 +231,6 @@ impl Service for PostgreSQL {
 
     fn selector(&self) -> Option<String> {
         Some(format!("app={}", self.sanitized_name()))
-    }
-
-    fn engine_error_scope(&self) -> EngineErrorScope {
-        EngineErrorScope::Database(
-            self.id().to_string(),
-            self.service_type().name().to_string(),
-            self.name().to_string(),
-        )
     }
 }
 

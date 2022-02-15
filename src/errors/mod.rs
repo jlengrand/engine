@@ -170,6 +170,8 @@ pub enum Tag {
     TerraformErrorWhileExecutingPipeline,
     /// TerraformErrorWhileExecutingDestroyPipeline: represents an error while executing Terraform destroying pipeline.
     TerraformErrorWhileExecutingDestroyPipeline,
+    /// TerraformContextUnsupportedParameterValue: represents an error while trying to render terraform context because of unsupported parameter value.
+    TerraformContextUnsupportedParameterValue,
     /// HelmChartsSetupError: represents an error while trying to setup helm charts.
     HelmChartsSetupError,
     /// HelmChartsDeployError: represents an error while trying to deploy helm charts.
@@ -198,6 +200,8 @@ pub enum Tag {
     ClientServiceFailedToDeployBeforeStart,
     /// DatabaseFailedToStartAfterSeveralRetries: represents an error while trying to start a database after several retries.
     DatabaseFailedToStartAfterSeveralRetries,
+    /// RouterFailedToDeploy: represents an error while trying to deploy a router.
+    RouterFailedToDeploy,
 }
 
 #[derive(Clone, Debug)]
@@ -1413,6 +1417,36 @@ impl EngineError {
         )
     }
 
+    /// Creates new error representing an unsupported value for Terraform context parameter.
+    ///
+    /// Arguments:
+    ///
+    /// * `event_details`: Error linked event details.
+    /// * `service_type`: Service type.
+    /// * `parameter_name`: Context parameter name.
+    /// * `parameter_value`: Context parameter value.
+    pub fn new_terraform_unsupported_context_parameter_value(
+        event_details: EventDetails,
+        service_type: String,
+        parameter_name: String,
+        parameter_value: String,
+    ) -> EngineError {
+        let message = format!(
+            "{} value `{}` not supported for parameter `{}`",
+            service_type, parameter_value, parameter_name,
+        );
+
+        EngineError::new(
+            event_details,
+            Tag::TerraformContextUnsupportedParameterValue,
+            message.to_string(),
+            message.to_string(),
+            None,
+            None,
+            None,
+        )
+    }
+
     /// Creates new error while setup Helm charts to deploy.
     ///
     /// Arguments:
@@ -1753,7 +1787,7 @@ impl EngineError {
         event_details: EventDetails,
         service_id: String,
         service_type: String,
-        raw_error: Some(CommandError),
+        raw_error: Option<CommandError>,
     ) -> EngineError {
         let message = format!(
             "Database `{}` (id `{}`) failed to start after several retries.",
@@ -1766,6 +1800,25 @@ impl EngineError {
             message.to_string(),
             message.to_string(),
             raw_error,
+            None,
+            None,
+        )
+    }
+
+    /// Creates new error while trying to deploy a router.
+    ///
+    /// Arguments:
+    ///
+    /// * `event_details`: Error linked event details.
+    pub fn new_router_failed_to_deploy(event_details: EventDetails) -> EngineError {
+        let message = "Router has failed to be deployed.";
+
+        EngineError::new(
+            event_details,
+            Tag::RouterFailedToDeploy,
+            message.to_string(),
+            message.to_string(),
+            None,
             None,
             None,
         )

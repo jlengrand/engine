@@ -13,9 +13,7 @@ use crate::cloud_provider::utilities::{print_action, sanitize_name, validate_k8s
 use crate::cloud_provider::DeploymentTarget;
 use crate::cmd::helm::Timeout;
 use crate::cmd::kubectl::ScalingKind::{Deployment, Statefulset};
-use crate::error::EngineErrorCause::Internal;
-use crate::error::{EngineError, EngineErrorScope};
-use crate::errors::CommandError;
+use crate::errors::{CommandError, EngineError};
 use crate::events::{EnvironmentStep, Stage, ToTransmitter, Transmitter};
 use crate::models::{Context, Listen, Listener, Listeners, ListenersHelper, Port};
 use ::function_name::named;
@@ -291,15 +289,12 @@ impl Service for Application {
     fn selector(&self) -> Option<String> {
         Some(format!("appId={}", self.id))
     }
-
-    fn engine_error_scope(&self) -> EngineErrorScope {
-        EngineErrorScope::Application(self.id().to_string(), self.name().to_string())
-    }
 }
 
 impl Create for Application {
     #[named]
     fn on_create(&self, target: &DeploymentTarget) -> Result<(), EngineError> {
+        let event_details = self.get_event_details(Stage::Environment(EnvironmentStep::Deploy));
         print_action(
             self.cloud_provider_name(),
             self.struct_name(),
@@ -308,7 +303,7 @@ impl Create for Application {
         );
 
         send_progress_on_long_task(self, crate::cloud_provider::service::Action::Create, || {
-            deploy_user_stateless_service(target, self)
+            deploy_user_stateless_service(target, self, event_details.clone(), self.logger())
         })
     }
 
@@ -318,6 +313,7 @@ impl Create for Application {
 
     #[named]
     fn on_create_error(&self, target: &DeploymentTarget) -> Result<(), EngineError> {
+        let event_details = self.get_event_details(Stage::Environment(EnvironmentStep::Deploy));
         print_action(
             self.cloud_provider_name(),
             self.struct_name(),
@@ -326,7 +322,7 @@ impl Create for Application {
         );
 
         send_progress_on_long_task(self, crate::cloud_provider::service::Action::Create, || {
-            deploy_stateless_service_error(target, self)
+            deploy_stateless_service_error(target, self, event_details.clone(), self.logger())
         })
     }
 }
@@ -334,6 +330,7 @@ impl Create for Application {
 impl Pause for Application {
     #[named]
     fn on_pause(&self, target: &DeploymentTarget) -> Result<(), EngineError> {
+        let event_details = self.get_event_details(Stage::Environment(EnvironmentStep::Pause));
         print_action(
             self.cloud_provider_name(),
             self.struct_name(),
