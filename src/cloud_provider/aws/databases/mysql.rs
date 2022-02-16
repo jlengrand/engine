@@ -6,7 +6,7 @@ use crate::cloud_provider::aws::databases::utilities::{aws_final_snapshot_name, 
 use crate::cloud_provider::service::{
     check_service_version, default_tera_context, delete_stateful_service, deploy_stateful_service, get_tfstate_name,
     get_tfstate_suffix, scale_down_database, send_progress_on_long_task, Action, Create, Database, DatabaseOptions,
-    DatabaseType, Delete, Helm, Pause, Service, ServiceType, StatefulService, Terraform,
+    DatabaseType, Delete, Helm, Pause, Service, ServiceType, ServiceVersionCheckResult, StatefulService, Terraform,
 };
 use crate::cloud_provider::utilities::{
     generate_supported_version, get_self_hosted_mysql_version, get_supported_version_to_use, managed_db_name_sanitizer,
@@ -15,13 +15,14 @@ use crate::cloud_provider::utilities::{
 use crate::cloud_provider::DeploymentTarget;
 use crate::cmd::helm::Timeout;
 use crate::cmd::kubectl;
-use crate::error::{EngineError, EngineErrorCause, EngineErrorScope, StringError};
-use crate::events::{EnvironmentStep, Stage, ToTransmitter, Transmitter};
+use crate::errors::{CommandError, EngineError};
+use crate::events::{EnvironmentStep, EventDetails, Stage, ToTransmitter, Transmitter};
+use crate::logger::Logger;
 use crate::models::DatabaseMode::MANAGED;
 use crate::models::{Context, DatabaseKind, Listen, Listener, Listeners};
 use ::function_name::named;
 
-pub struct MySQL {
+pub struct MySQL<'a> {
     context: Context,
     id: String,
     action: Action,
@@ -34,9 +35,10 @@ pub struct MySQL {
     database_instance_type: String,
     options: DatabaseOptions,
     listeners: Listeners,
+    logger: &'a dyn Logger,
 }
 
-impl MySQL {
+impl<'a> MySQL<'a> {
     pub fn new(
         context: Context,
         id: &str,
@@ -50,6 +52,7 @@ impl MySQL {
         database_instance_type: &str,
         options: DatabaseOptions,
         listeners: Listeners,
+        logger: &dyn Logger,
     ) -> Self {
         Self {
             context,
@@ -64,11 +67,20 @@ impl MySQL {
             database_instance_type: database_instance_type.to_string(),
             options,
             listeners,
+            logger,
         }
     }
 
-    fn matching_correct_version(&self, is_managed_services: bool) -> Result<String, EngineError> {
-        check_service_version(get_mysql_version(self.version(), is_managed_services), self)
+    fn matching_correct_version(
+        &self,
+        is_managed_services: bool,
+        event_details: EventDetails,
+    ) -> Result<ServiceVersionCheckResult, EngineError> {
+        check_service_version(
+            get_mysql_version(self.version(), is_managed_services),
+            self,
+            event_details,
+        )
     }
 
     fn cloud_provider_name(&self) -> &str {
@@ -161,17 +173,13 @@ impl Service for MySQL {
     }
 
     fn tera_context(&self, target: &DeploymentTarget) -> Result<TeraContext, EngineError> {
+        let event_details = self.get_event_details(Stage::Environment(EnvironmentStep::LoadConfiguration));
         let kubernetes = target.kubernetes;
         let environment = target.environment;
         let mut context = default_tera_context(self, kubernetes, environment);
 
         // we need the kubernetes config file to store tfstates file in kube secrets
-        let kube_config_file_path = match kubernetes.get_kubeconfig_file_path() {
-            Ok(path) => path,
-            Err(e) => {
-                return Err(e.to_legacy_engine_error());
-            }
-        };
+        let kube_config_file_path = kubernetes.get_kubeconfig_file_path()?;
         context.insert("kubeconfig_path", &kube_config_file_path);
 
         kubectl::kubectl_exec_create_namespace_without_labels(
@@ -182,21 +190,23 @@ impl Service for MySQL {
 
         context.insert("namespace", environment.namespace());
 
-        let version = &self.matching_correct_version(self.is_managed_service())?;
+        let version = &self.matching_correct_version(self.is_managed_service(), event_details.clone())?;
         context.insert("version", &version);
 
         if self.is_managed_service() {
-            let parameter_group_family = match get_parameter_group_from_version(&version, DatabaseKind::Mysql) {
-                Ok(v) => v,
-                Err(e) => {
-                    return Err(EngineError {
-                        cause: EngineErrorCause::Internal,
-                        scope: EngineErrorScope::Engine,
-                        execution_id: (&self.context.execution_id()).to_string(),
-                        message: Some(e),
-                    })
-                }
-            };
+            let parameter_group_family =
+                match get_parameter_group_from_version(&version.matched_version(), DatabaseKind::Mysql) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return Err(EngineError::new_terraform_unsupported_context_parameter_value(
+                            event_details.clone(),
+                            "MySQL".to_string(),
+                            "parameter_group_family".to_string(),
+                            version.matched_version(),
+                            Some(e),
+                        ))
+                    }
+                };
             context.insert("parameter_group_family", &parameter_group_family);
         };
 
@@ -240,6 +250,10 @@ impl Service for MySQL {
         }
 
         Ok(context)
+    }
+
+    fn logger(&self) -> &dyn Logger {
+        self.logger
     }
 
     fn selector(&self) -> Option<String> {
@@ -290,10 +304,12 @@ impl Create for MySQL {
             self.struct_name(),
             function_name!(),
             self.name(),
+            event_details,
+            self.logger(),
         );
 
         send_progress_on_long_task(self, crate::cloud_provider::service::Action::Create, || {
-            deploy_stateful_service(target, self, event_details.clone())
+            deploy_stateful_service(target, self, event_details.clone(), self.logger)
         })
     }
 
@@ -303,11 +319,14 @@ impl Create for MySQL {
 
     #[named]
     fn on_create_error(&self, _target: &DeploymentTarget) -> Result<(), EngineError> {
+        let event_details = self.get_event_details(Stage::Environment(EnvironmentStep::Deploy));
         print_action(
             self.cloud_provider_name(),
             self.struct_name(),
             function_name!(),
             self.name(),
+            event_details,
+            self.logger(),
         );
 
         Ok(())
@@ -317,11 +336,14 @@ impl Create for MySQL {
 impl Pause for MySQL {
     #[named]
     fn on_pause(&self, target: &DeploymentTarget) -> Result<(), EngineError> {
+        let event_details = self.get_event_details(Stage::Environment(EnvironmentStep::Pause));
         print_action(
             self.cloud_provider_name(),
             self.struct_name(),
             function_name!(),
             self.name(),
+            event_details,
+            self.logger(),
         );
 
         send_progress_on_long_task(self, crate::cloud_provider::service::Action::Pause, || {
@@ -335,11 +357,14 @@ impl Pause for MySQL {
 
     #[named]
     fn on_pause_error(&self, _target: &DeploymentTarget) -> Result<(), EngineError> {
+        let event_details = self.get_event_details(Stage::Environment(EnvironmentStep::Pause));
         print_action(
             self.cloud_provider_name(),
             self.struct_name(),
             function_name!(),
             self.name(),
+            event_details,
+            self.logger(),
         );
         Ok(())
     }
@@ -354,10 +379,12 @@ impl Delete for MySQL {
             self.struct_name(),
             function_name!(),
             self.name(),
+            event_details.clone(),
+            self.logger(),
         );
 
         send_progress_on_long_task(self, crate::cloud_provider::service::Action::Delete, || {
-            delete_stateful_service(target, self, event_details.clone())
+            delete_stateful_service(target, self, event_details, self.logger)
         })
     }
 
@@ -367,11 +394,14 @@ impl Delete for MySQL {
 
     #[named]
     fn on_delete_error(&self, _target: &DeploymentTarget) -> Result<(), EngineError> {
+        let event_details = self.get_event_details(Stage::Environment(EnvironmentStep::Delete));
         print_action(
             self.cloud_provider_name(),
             self.struct_name(),
             function_name!(),
             self.name(),
+            event_details,
+            self.logger(),
         );
         Ok(())
     }
@@ -387,7 +417,7 @@ impl Listen for MySQL {
     }
 }
 
-fn get_mysql_version(requested_version: String, is_managed_service: bool) -> Result<String, StringError> {
+fn get_mysql_version(requested_version: String, is_managed_service: bool) -> Result<String, CommandError> {
     if is_managed_service {
         get_managed_mysql_version(requested_version)
     } else {
@@ -395,7 +425,7 @@ fn get_mysql_version(requested_version: String, is_managed_service: bool) -> Res
     }
 }
 
-fn get_managed_mysql_version(requested_version: String) -> Result<String, StringError> {
+fn get_managed_mysql_version(requested_version: String) -> Result<String, CommandError> {
     let mut supported_mysql_versions = HashMap::new();
     // https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/CHAP_MySQL.html#MySQL.Concepts.VersionMgmt
 
@@ -424,6 +454,7 @@ fn get_managed_mysql_version(requested_version: String) -> Result<String, String
 mod tests_mysql {
     use crate::cloud_provider::aws::databases::mysql::{get_mysql_version, MySQL};
     use crate::cloud_provider::service::{Action, DatabaseOptions, Service};
+    use crate::logger::StdIoLogger;
     use crate::models::{Context, DatabaseMode};
 
     #[test]
@@ -486,6 +517,7 @@ mod tests_mysql {
                 publicly_accessible: false,
             },
             vec![],
+            &StdIoLogger::new(),
         );
         assert_eq!(database.sanitized_name(), db_expected_name);
     }

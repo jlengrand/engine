@@ -1,20 +1,21 @@
 use crate::cloud_provider::utilities::VersionsNumber;
 use crate::error::StringError;
+use crate::errors::CommandError;
 use crate::models::DatabaseKind;
 use std::str::FromStr;
 
-pub fn get_parameter_group_from_version(version: &str, database_kind: DatabaseKind) -> Result<String, StringError> {
+pub fn get_parameter_group_from_version(version: &str, database_kind: DatabaseKind) -> Result<String, CommandError> {
     let version_number = match VersionsNumber::from_str(version) {
         Ok(v) => {
             if v.minor.is_none() {
-                return Err(format!(
+                return Err(CommandError::new_from_safe_message(format!(
                     "Can't determine the minor version, to select parameter group for {:?} version {}",
                     database_kind, version
-                ));
+                )));
             };
             v
         }
-        Err(e) => return Err(e),
+        Err(e) => return Err(CommandError::new_from_safe_message(e.to_string())),
     };
 
     match database_kind {

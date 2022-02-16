@@ -3,8 +3,7 @@ use std::collections::HashMap;
 use crate::cloud_provider::models::CpuLimits;
 use crate::error::{EngineError, StringError};
 use crate::errors::CommandError;
-use crate::events::io::EngineEvent;
-use crate::events::EventDetails;
+use crate::events::{EngineEvent, EventDetails, EventMessage};
 use crate::logger::{LogLevel, Logger};
 use crate::models::{Listeners, ListenersHelper, ProgressInfo, ProgressLevel, ProgressScope};
 use chrono::Duration;
@@ -524,8 +523,14 @@ pub fn print_action(
         cloud_provider_name, struct_name, fn_name, item_name
     );
     match fn_name.contains("error") {
-        true => logger.log(LogLevel),
-        false => info!("{}", msg),
+        true => logger.log(
+            LogLevel::Warning,
+            EngineEvent::Warning(event_details, EventMessage::new_from_safe(msg)),
+        ),
+        false => logger.log(
+            LogLevel::Info,
+            EngineEvent::Info(event_details, EventMessage::new_from_safe(msg)),
+        ),
     }
 }
 

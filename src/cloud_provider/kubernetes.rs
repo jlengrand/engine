@@ -16,7 +16,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::cloud_provider::aws::regions::AwsZones;
 use crate::cloud_provider::environment::Environment;
-use crate::cloud_provider::models::NodeGroups;
 use crate::cloud_provider::models::{CpuLimits, NodeGroups};
 use crate::cloud_provider::service::CheckAction;
 use crate::cloud_provider::utilities::VersionsNumber;
@@ -100,7 +99,8 @@ pub trait Kubernetes: Listen {
                         .to_string(),
                     ),
                 );
-                self.logger().log(LogLevel::Error, EngineEvent::Error(error.clone()));
+                self.logger()
+                    .log(LogLevel::Error, EngineEvent::Error(error.clone(), None));
                 return Err(error);
             }
         };
@@ -114,7 +114,8 @@ pub trait Kubernetes: Listen {
                         format!("Error getting file metadata, error: {}", err.to_string(),).to_string(),
                     ),
                 );
-                self.logger().log(LogLevel::Error, EngineEvent::Error(error.clone()));
+                self.logger()
+                    .log(LogLevel::Error, EngineEvent::Error(error.clone(), None));
                 return Err(error);
             }
         };
@@ -129,7 +130,8 @@ pub trait Kubernetes: Listen {
                     err.to_string(),
                 )),
             );
-            self.logger().log(LogLevel::Error, EngineEvent::Error(error.clone()));
+            self.logger()
+                .log(LogLevel::Error, EngineEvent::Error(error.clone(), None));
             return Err(error);
         }
 
@@ -158,7 +160,8 @@ pub trait Kubernetes: Listen {
                     ),
                 );
 
-                self.logger().log(LogLevel::Error, EngineEvent::Error(error.clone()));
+                self.logger()
+                    .log(LogLevel::Error, EngineEvent::Error(error.clone(), None));
 
                 return Err(error);
             }
@@ -367,6 +370,7 @@ pub fn deploy_environment(
     kubernetes: &dyn Kubernetes,
     environment: &Environment,
     event_details: EventDetails,
+    logger: &dyn Logger,
 ) -> Result<(), EngineError> {
     let listeners_helper = ListenersHelper::new(kubernetes.listeners());
 
@@ -397,6 +401,7 @@ pub fn deploy_environment(
             kubernetes,
             service,
             event_details.clone(),
+            logger,
             &stateful_deployment_target,
             &listeners_helper,
             "deployment",
@@ -409,6 +414,7 @@ pub fn deploy_environment(
             kubernetes,
             service,
             event_details.clone(),
+            logger,
             &stateful_deployment_target,
             &listeners_helper,
             "check deployment",
@@ -432,6 +438,7 @@ pub fn deploy_environment(
             kubernetes,
             service,
             event_details.clone(),
+            logger,
             &stateless_deployment_target,
             &listeners_helper,
             "deployment",
@@ -447,6 +454,7 @@ pub fn deploy_environment(
             kubernetes,
             service,
             event_details.clone(),
+            logger,
             &stateless_deployment_target,
             &listeners_helper,
             "check deployment",
@@ -462,6 +470,7 @@ pub fn deploy_environment_error(
     kubernetes: &dyn Kubernetes,
     environment: &Environment,
     event_details: EventDetails,
+    logger: &dyn Logger,
 ) -> Result<(), EngineError> {
     let listeners_helper = ListenersHelper::new(kubernetes.listeners());
 
@@ -486,6 +495,7 @@ pub fn deploy_environment_error(
             kubernetes,
             service,
             event_details.clone(),
+            logger,
             &stateful_deployment_target,
             &listeners_helper,
             "revert deployment",
@@ -509,6 +519,7 @@ pub fn deploy_environment_error(
             kubernetes,
             service,
             event_details.clone(),
+            logger,
             &stateless_deployment_target,
             &listeners_helper,
             "revert deployment",
@@ -524,6 +535,7 @@ pub fn pause_environment(
     kubernetes: &dyn Kubernetes,
     environment: &Environment,
     event_details: EventDetails,
+    logger: &dyn Logger,
 ) -> Result<(), EngineError> {
     let listeners_helper = ListenersHelper::new(kubernetes.listeners());
 
@@ -545,6 +557,7 @@ pub fn pause_environment(
             kubernetes,
             service,
             event_details.clone(),
+            logger,
             &stateless_deployment_target,
             &listeners_helper,
             "pause",
@@ -562,6 +575,7 @@ pub fn pause_environment(
             kubernetes,
             service,
             event_details.clone(),
+            logger,
             &stateful_deployment_target,
             &listeners_helper,
             "pause",
@@ -578,6 +592,7 @@ pub fn pause_environment(
             kubernetes,
             service,
             event_details.clone(),
+            logger,
             &stateless_deployment_target,
             &listeners_helper,
             "check pause",
@@ -595,6 +610,7 @@ pub fn pause_environment(
             kubernetes,
             service,
             event_details.clone(),
+            logger,
             &stateful_deployment_target,
             &listeners_helper,
             "check pause",
@@ -610,6 +626,7 @@ pub fn delete_environment(
     kubernetes: &dyn Kubernetes,
     environment: &Environment,
     event_details: EventDetails,
+    logger: &dyn Logger,
 ) -> Result<(), EngineError> {
     let listeners_helper = ListenersHelper::new(kubernetes.listeners());
 
@@ -631,6 +648,7 @@ pub fn delete_environment(
             kubernetes,
             service,
             event_details.clone(),
+            logger,
             &stateless_deployment_target,
             &listeners_helper,
             "delete",
@@ -648,6 +666,7 @@ pub fn delete_environment(
             kubernetes,
             service,
             event_details.clone(),
+            logger,
             &stateful_deployment_target,
             &listeners_helper,
             "delete",
@@ -664,6 +683,7 @@ pub fn delete_environment(
             kubernetes,
             service,
             event_details.clone(),
+            logger,
             &stateless_deployment_target,
             &listeners_helper,
             "delete check",
@@ -681,6 +701,7 @@ pub fn delete_environment(
             kubernetes,
             service,
             event_details.clone(),
+            logger,
             &stateful_deployment_target,
             &listeners_helper,
             "delete check",
@@ -1340,6 +1361,8 @@ pub fn validate_k8s_required_cpu_and_burstable(
     context_id: &str,
     total_cpu: String,
     cpu_burst: String,
+    event_details: EventDetails,
+    logger: &dyn Logger,
 ) -> Result<CpuLimits, CommandError> {
     let total_cpu_float = convert_k8s_cpu_value_to_f32(total_cpu.clone())?;
     let cpu_burst_float = convert_k8s_cpu_value_to_f32(cpu_burst.clone())?;
@@ -1347,9 +1370,8 @@ pub fn validate_k8s_required_cpu_and_burstable(
 
     if cpu_burst_float < total_cpu_float {
         let message = format!(
-            "CPU burst value '{}' was lower than the desired total of CPUs {}, using burstable value. Please ensure your configuration is valid",
-            cpu_burst,
-            total_cpu,
+            "CPU burst value '{}' was lower than the desired total of CPUs {}, using burstable value.",
+            cpu_burst, total_cpu,
         );
 
         listener_helper.error(ProgressInfo::new(
@@ -1357,9 +1379,14 @@ pub fn validate_k8s_required_cpu_and_burstable(
                 id: execution_id.to_string(),
             },
             ProgressLevel::Warn,
-            Some(message),
+            Some(message.to_string()),
             context_id,
         ));
+
+        logger.log(
+            LogLevel::Warning,
+            EngineEvent::Warning(event_details, EventMessage::new_from_safe(message)),
+        );
 
         set_cpu_burst = total_cpu.clone();
     }
@@ -1380,7 +1407,10 @@ pub fn convert_k8s_cpu_value_to_f32(value: String) -> Result<f32, CommandError> 
             }
             Err(e) => Err(CommandError::new(
                 e.to_string(),
-                Some(format!("Error while trying to parse `{}` to float 32.", m.as_str())),
+                Some(format!(
+                    "Error while trying to parse `{}` to float 32.",
+                    value_number_string.as_str()
+                )),
             )),
         };
     }
@@ -1389,13 +1419,14 @@ pub fn convert_k8s_cpu_value_to_f32(value: String) -> Result<f32, CommandError> 
         Ok(n) => Ok(n),
         Err(e) => Err(CommandError::new(
             e.to_string(),
-            Some(format!("Error while trying to parse `{}` to float 32.", m.as_str())),
+            Some(format!("Error while trying to parse `{}` to float 32.", value.as_str())),
         )),
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::cloud_provider::Kind::Aws;
     use std::str::FromStr;
 
     use crate::cloud_provider::kubernetes::{
@@ -1406,7 +1437,7 @@ mod tests {
     use crate::cloud_provider::utilities::VersionsNumber;
     use crate::cmd::structs::{KubernetesList, KubernetesNode, KubernetesVersion};
     use crate::events::{EngineEvent, EventDetails, InfrastructureStep, Stage, Transmitter};
-    use crate::logger::{LogLevel, Logger};
+    use crate::logger::{LogLevel, Logger, StdIoLogger};
     use crate::models::{ListenersHelper, QoveryIdentifier};
 
     #[test]
@@ -1422,7 +1453,7 @@ mod tests {
             Stage::Infrastructure(InfrastructureStep::Upgrade),
             Transmitter::Kubernetes(QoveryIdentifier::new_random().to_string(), "test".to_string()),
         );
-        let logger = FakeLogger::new();
+        let logger = StdIoLogger::new();
 
         // test full cluster upgrade (masters + workers)
         let result = check_kubernetes_upgrade_status(
@@ -1988,14 +2019,35 @@ mod tests {
     pub fn test_cpu_set() {
         let v = vec![];
         let listener_helper = ListenersHelper::new(&v);
+        let logger = StdIoLogger::new();
         let execution_id = "execution_id";
         let context_id = "context_id";
+        let organization_id = "organization_id";
+        let cluster_id = "cluster_id";
+
+        let event_details = EventDetails::new(
+            Some(Aws),
+            QoveryIdentifier::new(organization_id.to_string()),
+            QoveryIdentifier::new(cluster_id.to_string()),
+            QoveryIdentifier::new(execution_id.to_string()),
+            Some("region_fake".to_string()),
+            Stage::Infrastructure(InfrastructureStep::LoadConfiguration),
+            Transmitter::Kubernetes(cluster_id.to_string(), format!("{}-name", cluster_id)),
+        );
 
         let mut total_cpu = "0.25".to_string();
         let mut cpu_burst = "1".to_string();
         assert_eq!(
-            validate_k8s_required_cpu_and_burstable(&listener_helper, execution_id, context_id, total_cpu, cpu_burst)
-                .unwrap(),
+            validate_k8s_required_cpu_and_burstable(
+                &listener_helper,
+                execution_id,
+                context_id,
+                total_cpu,
+                cpu_burst,
+                event_details.clone(),
+                &logger
+            )
+            .unwrap(),
             CpuLimits {
                 cpu_request: "0.25".to_string(),
                 cpu_limit: "1".to_string()
@@ -2005,8 +2057,16 @@ mod tests {
         total_cpu = "1".to_string();
         cpu_burst = "0.5".to_string();
         assert_eq!(
-            validate_k8s_required_cpu_and_burstable(&listener_helper, execution_id, context_id, total_cpu, cpu_burst)
-                .unwrap(),
+            validate_k8s_required_cpu_and_burstable(
+                &listener_helper,
+                execution_id,
+                context_id,
+                total_cpu,
+                cpu_burst,
+                event_details.clone(),
+                &logger
+            )
+            .unwrap(),
             CpuLimits {
                 cpu_request: "1".to_string(),
                 cpu_limit: "1".to_string()

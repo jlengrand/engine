@@ -7,7 +7,6 @@ use uuid::Uuid;
 
 use crate::cloud_provider::{CloudProvider, EngineError, Kind, TerraformStateCredentials};
 use crate::constants::{AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY};
-use crate::error::EngineErrorCause;
 use crate::models::{Context, Listen, Listener, Listeners};
 use crate::runtime::block_on;
 

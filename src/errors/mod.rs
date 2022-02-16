@@ -152,6 +152,8 @@ pub enum Tag {
     K8sNodeIsNotReadyWithTheRequestedVersion,
     /// K8sNodeIsNotReady: represents an error where the given node is not ready.
     K8sNodeIsNotReady,
+    /// K8sValidateRequiredCPUandBurstableError: represents an error validating required CPU and burstable.
+    K8sValidateRequiredCPUandBurstableError,
     /// CannotFindRequiredBinary: represents an error where a required binary is not found on the system.
     CannotFindRequiredBinary,
     /// SubnetsCountShouldBeEven: represents an error where subnets count should be even to have as many public than private subnets.
@@ -1201,6 +1203,31 @@ impl EngineError {
         )
     }
 
+    /// Creates new error for kubernetes validate required CPU and burstable.
+    ///
+    /// Arguments:
+    ///
+    /// * `event_details`: Error linked event details.
+    /// * `raw_error`: Raw error message.
+    pub fn new_k8s_validate_required_cpu_and_burstable_error(
+        event_details: EventDetails,
+        total_cpus_raw: String,
+        cpu_burst_raw: String,
+        raw_error: CommandError,
+    ) -> EngineError {
+        let message = "Error while trying to validate required CPU and burstable.";
+
+        EngineError::new(
+            event_details,
+            Tag::K8sValidateRequiredCPUandBurstableError,
+            message.to_string(),
+            message.to_string(),
+            Some(raw_error),
+            None,
+            Some("Please ensure your configuration is valid.".to_string()),
+        )
+    }
+
     /// Creates new error for kubernetes not being able to get crash looping pods.
     ///
     /// Arguments:
@@ -1425,11 +1452,13 @@ impl EngineError {
     /// * `service_type`: Service type.
     /// * `parameter_name`: Context parameter name.
     /// * `parameter_value`: Context parameter value.
+    /// * `raw_error`: Raw error message.
     pub fn new_terraform_unsupported_context_parameter_value(
         event_details: EventDetails,
         service_type: String,
         parameter_name: String,
         parameter_value: String,
+        raw_error: Option<CommandError>,
     ) -> EngineError {
         let message = format!(
             "{} value `{}` not supported for parameter `{}`",
@@ -1441,7 +1470,7 @@ impl EngineError {
             Tag::TerraformContextUnsupportedParameterValue,
             message.to_string(),
             message.to_string(),
-            None,
+            raw_error,
             None,
             None,
         )
