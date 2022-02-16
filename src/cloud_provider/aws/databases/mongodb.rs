@@ -292,6 +292,8 @@ impl<'a> Create for MongoDB<'a> {
             self.struct_name(),
             function_name!(),
             self.name(),
+            event_details.clone(),
+            self.logger,
         );
 
         send_progress_on_long_task(self, crate::cloud_provider::service::Action::Create, || {

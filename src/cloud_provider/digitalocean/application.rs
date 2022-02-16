@@ -9,7 +9,7 @@ use crate::cloud_provider::service::{
     scale_down_application, send_progress_on_long_task, Action, Create, Delete, Helm, Pause, Service, ServiceType,
     StatelessService,
 };
-use crate::cloud_provider::utilities::{print_action, sanitize_name, validate_k8s_required_cpu_and_burstable};
+use crate::cloud_provider::utilities::{print_action, sanitize_name};
 use crate::cloud_provider::DeploymentTarget;
 use crate::cmd::helm::Timeout;
 use crate::cmd::kubectl::ScalingKind::{Deployment, Statefulset};

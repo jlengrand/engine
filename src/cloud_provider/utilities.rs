@@ -420,6 +420,8 @@ pub fn check_domain_for(
     domains_to_check: Vec<&str>,
     execution_id: &str,
     context_id: &str,
+    event_details: EventDetails,
+    logger: &dyn Logger,
 ) -> Result<(), EngineError> {
     let resolver = cloudflare_dns_resolver();
 
@@ -522,7 +524,7 @@ pub fn print_action(
         cloud_provider_name, struct_name, fn_name, item_name
     );
     match fn_name.contains("error") {
-        true => logger.log(LogLevel::Warning, EngineEvent::Deleting {}),
+        true => logger.log(LogLevel),
         false => info!("{}", msg),
     }
 }
