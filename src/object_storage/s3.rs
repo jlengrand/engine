@@ -5,6 +5,7 @@ use std::path::Path;
 use std::str::FromStr;
 
 use crate::cloud_provider::aws::regions::AwsRegion;
+use crate::errors::EngineError;
 use rusoto_core::credential::StaticProvider;
 use rusoto_core::{Client, HttpClient, Region as RusotoRegion};
 use rusoto_s3::{
@@ -14,7 +15,6 @@ use rusoto_s3::{
 };
 use tokio::io;
 
-use crate::error::{EngineError, EngineErrorCause};
 use crate::models::{Context, StringPath};
 use crate::object_storage::{Kind, ObjectStorage};
 use crate::runtime::block_on;

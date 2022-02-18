@@ -3,19 +3,20 @@ use tera::Context as TeraContext;
 use crate::cloud_provider::service::{
     check_service_version, default_tera_context, delete_stateful_service, deploy_stateful_service, get_tfstate_name,
     get_tfstate_suffix, scale_down_database, send_progress_on_long_task, Action, Create, Database, DatabaseOptions,
-    DatabaseType, Delete, Helm, Pause, Service, ServiceType, StatefulService, Terraform,
+    DatabaseType, Delete, Helm, Pause, Service, ServiceType, ServiceVersionCheckResult, StatefulService, Terraform,
 };
 use crate::cloud_provider::utilities::{get_self_hosted_redis_version, print_action, sanitize_name};
 use crate::cloud_provider::DeploymentTarget;
 use crate::cmd::helm::Timeout;
 use crate::cmd::kubectl;
-use crate::error::{EngineError, EngineErrorScope};
-use crate::events::{EnvironmentStep, Stage, ToTransmitter, Transmitter};
+use crate::errors::EngineError;
+use crate::events::{EnvironmentStep, EventDetails, Stage, ToTransmitter, Transmitter};
+use crate::logger::Logger;
 use crate::models::DatabaseMode::MANAGED;
 use crate::models::{Context, Listen, Listener, Listeners};
 use ::function_name::named;
 
-pub struct Redis {
+pub struct Redis<'a> {
     context: Context,
     id: String,
     action: Action,
@@ -28,9 +29,10 @@ pub struct Redis {
     database_instance_type: String,
     options: DatabaseOptions,
     listeners: Listeners,
+    logger: &'a dyn Logger,
 }
 
-impl Redis {
+impl<'a> Redis<'a> {
     pub fn new(
         context: Context,
         id: &str,
@@ -44,6 +46,7 @@ impl Redis {
         database_instance_type: &str,
         options: DatabaseOptions,
         listeners: Listeners,
+        logger: &'a dyn Logger,
     ) -> Self {
         Self {
             context,
@@ -58,11 +61,12 @@ impl Redis {
             database_instance_type: database_instance_type.to_string(),
             options,
             listeners,
+            logger,
         }
     }
 
-    fn matching_correct_version(&self) -> Result<String, EngineError> {
-        check_service_version(get_self_hosted_redis_version(self.version()), self)
+    fn matching_correct_version(&self, event_details: EventDetails) -> Result<ServiceVersionCheckResult, EngineError> {
+        check_service_version(get_self_hosted_redis_version(self.version()), self, event_details)
     }
 
     fn cloud_provider_name(&self) -> &str {
@@ -74,13 +78,13 @@ impl Redis {
     }
 }
 
-impl StatefulService for Redis {
+impl<'a> StatefulService for Redis<'a> {
     fn is_managed_service(&self) -> bool {
         self.options.mode == MANAGED
     }
 }
 
-impl ToTransmitter for Redis {
+impl<'a> ToTransmitter for Redis<'a> {
     fn to_transmitter(&self) -> Transmitter {
         Transmitter::Database(
             self.id().to_string(),
@@ -90,7 +94,7 @@ impl ToTransmitter for Redis {
     }
 }
 
-impl Service for Redis {
+impl<'a> Service for Redis<'a> {
     fn context(&self) -> &Context {
         &self.context
     }
@@ -152,17 +156,13 @@ impl Service for Redis {
     }
 
     fn tera_context(&self, target: &DeploymentTarget) -> Result<TeraContext, EngineError> {
+        let event_details = self.get_event_details(Stage::Environment(EnvironmentStep::LoadConfiguration));
         let kubernetes = target.kubernetes;
         let environment = target.environment;
         let mut context = default_tera_context(self, kubernetes, environment);
 
         // we need the kubernetes config file to store tfstates file in kube secrets
-        let kube_config_file_path = match kubernetes.get_kubeconfig_file_path() {
-            Ok(path) => path,
-            Err(e) => {
-                return Err(e.to_legacy_engine_error());
-            }
-        };
+        let kube_config_file_path = kubernetes.get_kubeconfig_file_path()?;
         context.insert("kubeconfig_path", &kube_config_file_path);
 
         kubectl::kubectl_exec_create_namespace_without_labels(
@@ -171,7 +171,7 @@ impl Service for Redis {
             kubernetes.cloud_provider().credentials_environment_variables(),
         );
 
-        let version = self.matching_correct_version()?;
+        let version = self.matching_correct_version(event_details.clone())?.matched_version();
 
         context.insert("namespace", environment.namespace());
         context.insert("version", &version);
@@ -217,18 +217,14 @@ impl Service for Redis {
         Some(format!("app={}", self.sanitized_name()))
     }
 
-    fn engine_error_scope(&self) -> EngineErrorScope {
-        EngineErrorScope::Database(
-            self.id().to_string(),
-            self.service_type().name().to_string(),
-            self.name().to_string(),
-        )
+    fn logger(&self) -> &dyn Logger {
+        self.logger
     }
 }
 
-impl Database for Redis {}
+impl<'a> Database for Redis<'a> {}
 
-impl Helm for Redis {
+impl<'a> Helm for Redis<'a> {
     fn helm_selector(&self) -> Option<String> {
         self.selector()
     }
@@ -250,7 +246,7 @@ impl Helm for Redis {
     }
 }
 
-impl Terraform for Redis {
+impl<'a> Terraform for Redis<'a> {
     fn terraform_common_resource_dir_path(&self) -> String {
         format!("{}/digitalocean/services/common", self.context.lib_root_dir())
     }
@@ -260,7 +256,7 @@ impl Terraform for Redis {
     }
 }
 
-impl Create for Redis {
+impl<'a> Create for Redis<'a> {
     #[named]
     fn on_create(&self, target: &DeploymentTarget) -> Result<(), EngineError> {
         let event_details = self.get_event_details(Stage::Environment(EnvironmentStep::Deploy));
@@ -269,12 +265,14 @@ impl Create for Redis {
             self.struct_name(),
             function_name!(),
             self.name(),
+            event_details.clone(),
+            self.logger(),
         );
 
         send_progress_on_long_task(
             self,
             crate::cloud_provider::service::Action::Create,
-            Box::new(|| deploy_stateful_service(target, self, event_details.clone())),
+            Box::new(|| deploy_stateful_service(target, self, event_details, self.logger())),
         )
     }
 
@@ -285,24 +283,30 @@ impl Create for Redis {
 
     #[named]
     fn on_create_error(&self, _target: &DeploymentTarget) -> Result<(), EngineError> {
+        let event_details = self.get_event_details(Stage::Environment(EnvironmentStep::Deploy));
         print_action(
             self.cloud_provider_name(),
             self.struct_name(),
             function_name!(),
             self.name(),
+            event_details,
+            self.logger(),
         );
         Ok(())
     }
 }
 
-impl Pause for Redis {
+impl<'a> Pause for Redis<'a> {
     #[named]
     fn on_pause(&self, target: &DeploymentTarget) -> Result<(), EngineError> {
+        let event_details = self.get_event_details(Stage::Environment(EnvironmentStep::Pause));
         print_action(
             self.cloud_provider_name(),
             self.struct_name(),
             function_name!(),
             self.name(),
+            event_details,
+            self.logger(),
         );
 
         send_progress_on_long_task(self, crate::cloud_provider::service::Action::Pause, || {
@@ -316,17 +320,20 @@ impl Pause for Redis {
 
     #[named]
     fn on_pause_error(&self, _target: &DeploymentTarget) -> Result<(), EngineError> {
+        let event_details = self.get_event_details(Stage::Environment(EnvironmentStep::Pause));
         print_action(
             self.cloud_provider_name(),
             self.struct_name(),
             function_name!(),
             self.name(),
+            event_details,
+            self.logger(),
         );
         Ok(())
     }
 }
 
-impl Delete for Redis {
+impl<'a> Delete for Redis<'a> {
     #[named]
     fn on_delete(&self, target: &DeploymentTarget) -> Result<(), EngineError> {
         let event_details = self.get_event_details(Stage::Environment(EnvironmentStep::Delete));
@@ -335,12 +342,14 @@ impl Delete for Redis {
             self.struct_name(),
             function_name!(),
             self.name(),
+            event_details.clone(),
+            self.logger(),
         );
 
         send_progress_on_long_task(
             self,
             crate::cloud_provider::service::Action::Pause,
-            Box::new(|| delete_stateful_service(target, self, event_details.clone())),
+            Box::new(|| delete_stateful_service(target, self, event_details, self.logger())),
         )
     }
 
@@ -350,17 +359,20 @@ impl Delete for Redis {
 
     #[named]
     fn on_delete_error(&self, _target: &DeploymentTarget) -> Result<(), EngineError> {
+        let event_details = self.get_event_details(Stage::Environment(EnvironmentStep::Delete));
         print_action(
             self.cloud_provider_name(),
             self.struct_name(),
             function_name!(),
             self.name(),
+            event_details,
+            self.logger(),
         );
         Ok(())
     }
 }
 
-impl Listen for Redis {
+impl<'a> Listen for Redis<'a> {
     fn listeners(&self) -> &Listeners {
         &self.listeners
     }

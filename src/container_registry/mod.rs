@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::build_platform::Image;
-use crate::error::{EngineError, EngineErrorCause, EngineErrorScope};
-use crate::models::{Context, Listen};
+use crate::errors::EngineError;
+use crate::events::{EnvironmentStep, EventDetails, Stage};
+use crate::models::{Context, Listen, QoveryIdentifier};
 
 pub mod docker;
 pub mod docker_hub;
@@ -27,15 +28,16 @@ pub trait ContainerRegistry: Listen {
     fn pull(&self, image: &Image) -> Result<PullResult, EngineError>;
     fn push(&self, image: &Image, force_push: bool) -> Result<PushResult, EngineError>;
     fn push_error(&self, image: &Image) -> Result<PushResult, EngineError>;
-    fn engine_error_scope(&self) -> EngineErrorScope {
-        EngineErrorScope::ContainerRegistry(self.id().to_string(), self.name().to_string())
-    }
-    fn engine_error(&self, cause: EngineErrorCause, message: String) -> EngineError {
-        EngineError::new(
-            cause,
-            self.engine_error_scope(),
-            self.context().execution_id(),
-            Some(message),
+    fn get_event_details(&self) -> EventDetails {
+        let context = self.context();
+        EventDetails::new(
+            None,
+            QoveryIdentifier::from(context.organization_id().to_string()),
+            QoveryIdentifier::from(context.cluster_id().to_string()),
+            QoveryIdentifier::from(context.execution_id().to_string()),
+            None,
+            Stage::Environment(EnvironmentStep::Build),
+            self.to_transmitter(),
         )
     }
 }

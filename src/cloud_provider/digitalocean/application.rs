@@ -1,6 +1,7 @@
 use tera::Context as TeraContext;
 
 use crate::build_platform::Image;
+use crate::cloud_provider::kubernetes::validate_k8s_required_cpu_and_burstable;
 use crate::cloud_provider::models::{
     EnvironmentVariable, EnvironmentVariableDataTemplate, Storage, StorageDataTemplate,
 };
@@ -14,13 +15,14 @@ use crate::cloud_provider::DeploymentTarget;
 use crate::cmd::helm::Timeout;
 use crate::cmd::kubectl::ScalingKind::{Deployment, Statefulset};
 use crate::errors::{CommandError, EngineError};
-use crate::events::{EnvironmentStep, Stage, ToTransmitter, Transmitter};
+use crate::events::{EngineEvent, EnvironmentStep, EventMessage, Stage, ToTransmitter, Transmitter};
+use crate::logger::{LogLevel, Logger};
 use crate::models::{Context, Listen, Listener, Listeners, ListenersHelper, Port};
 use ::function_name::named;
 use std::fmt;
 use std::str::FromStr;
 
-pub struct Application {
+pub struct Application<'a> {
     context: Context,
     id: String,
     action: Action,
@@ -36,9 +38,10 @@ pub struct Application {
     storage: Vec<Storage<StorageType>>,
     environment_variables: Vec<EnvironmentVariable>,
     listeners: Listeners,
+    logger: &'a dyn Logger,
 }
 
-impl Application {
+impl<'a> Application<'a> {
     pub fn new(
         context: Context,
         id: &str,
@@ -55,6 +58,7 @@ impl Application {
         storage: Vec<Storage<StorageType>>,
         environment_variables: Vec<EnvironmentVariable>,
         listeners: Listeners,
+        logger: &dyn Logger,
     ) -> Self {
         Application {
             context,
@@ -72,6 +76,7 @@ impl Application {
             storage,
             environment_variables,
             listeners,
+            logger,
         }
     }
 
@@ -88,7 +93,7 @@ impl Application {
     }
 }
 
-impl crate::cloud_provider::service::Application for Application {
+impl<'a> crate::cloud_provider::service::Application for Application<'a> {
     fn image(&self) -> &Image {
         &self.image
     }
@@ -98,7 +103,7 @@ impl crate::cloud_provider::service::Application for Application {
     }
 }
 
-impl Helm for Application {
+impl<'a> Helm for Application<'a> {
     fn helm_selector(&self) -> Option<String> {
         self.selector()
     }
@@ -120,15 +125,15 @@ impl Helm for Application {
     }
 }
 
-impl StatelessService for Application {}
+impl<'a> StatelessService for Application<'a> {}
 
-impl ToTransmitter for Application {
+impl<'a> ToTransmitter for Application<'a> {
     fn to_transmitter(&self) -> Transmitter {
         Transmitter::Application(self.id().to_string(), self.name().to_string())
     }
 }
 
-impl Service for Application {
+impl<'a> Service for Application<'a> {
     fn context(&self) -> &Context {
         &self.context
     }
@@ -193,6 +198,7 @@ impl Service for Application {
     }
 
     fn tera_context(&self, target: &DeploymentTarget) -> Result<TeraContext, EngineError> {
+        let event_details = self.get_event_details(Stage::Environment(EnvironmentStep::LoadConfiguration));
         let kubernetes = target.kubernetes;
         let environment = target.environment;
         let mut context = default_tera_context(self, kubernetes, environment);
@@ -204,10 +210,18 @@ impl Service for Application {
             Some(registry_url) => context.insert("image_name_with_tag", registry_url.as_str()),
             None => {
                 let image_name_with_tag = self.image.name_with_tag();
-                warn!(
-                    "there is no registry url, use image name with tag with the default container registry: {}",
-                    image_name_with_tag.as_str()
+
+                self.logger().log(
+                    LogLevel::Warning,
+                    EngineEvent::Warning(
+                        event_details.clone(),
+                        EventMessage::new_from_safe(format!(
+                            "there is no registry url, use image name with tag with the default container registry: {}",
+                            image_name_with_tag.as_str()
+                        )),
+                    ),
                 );
+
                 context.insert("image_name_with_tag", image_name_with_tag.as_str());
             }
         }
@@ -218,14 +232,16 @@ impl Service for Application {
             &self.id,
             self.total_cpus(),
             self.cpu_burst(),
+            event_details.clone(),
+            self.logger(),
         ) {
             Ok(l) => l,
             Err(e) => {
-                return Err(EngineError::new(
-                    Internal,
-                    EngineErrorScope::Application(self.id().to_string(), self.name().to_string()),
-                    self.context.execution_id(),
-                    Some(e.to_string()),
+                return Err(EngineError::new_k8s_validate_required_cpu_and_burstable_error(
+                    event_details.clone(),
+                    self.total_cpus(),
+                    self.cpu_burst(),
+                    e,
                 ));
             }
         };
@@ -286,12 +302,16 @@ impl Service for Application {
         Ok(context)
     }
 
+    fn logger(&self) -> &dyn Logger {
+        self.logger
+    }
+
     fn selector(&self) -> Option<String> {
         Some(format!("appId={}", self.id))
     }
 }
 
-impl Create for Application {
+impl<'a> Create for Application<'a> {
     #[named]
     fn on_create(&self, target: &DeploymentTarget) -> Result<(), EngineError> {
         let event_details = self.get_event_details(Stage::Environment(EnvironmentStep::Deploy));
@@ -300,10 +320,12 @@ impl Create for Application {
             self.struct_name(),
             function_name!(),
             self.name(),
+            event_details.clone(),
+            self.logger(),
         );
 
         send_progress_on_long_task(self, crate::cloud_provider::service::Action::Create, || {
-            deploy_user_stateless_service(target, self, event_details.clone(), self.logger())
+            deploy_user_stateless_service(target, self, event_details)
         })
     }
 
@@ -319,15 +341,17 @@ impl Create for Application {
             self.struct_name(),
             function_name!(),
             self.name(),
+            event_details,
+            self.logger(),
         );
 
         send_progress_on_long_task(self, crate::cloud_provider::service::Action::Create, || {
-            deploy_stateless_service_error(target, self, event_details.clone(), self.logger())
+            deploy_stateless_service_error(target, self)
         })
     }
 }
 
-impl Pause for Application {
+impl<'a> Pause for Application<'a> {
     #[named]
     fn on_pause(&self, target: &DeploymentTarget) -> Result<(), EngineError> {
         let event_details = self.get_event_details(Stage::Environment(EnvironmentStep::Pause));
@@ -336,6 +360,8 @@ impl Pause for Application {
             self.struct_name(),
             function_name!(),
             self.name(),
+            event_details,
+            self.logger(),
         );
 
         send_progress_on_long_task(self, crate::cloud_provider::service::Action::Pause, || {
@@ -354,18 +380,21 @@ impl Pause for Application {
 
     #[named]
     fn on_pause_error(&self, _target: &DeploymentTarget) -> Result<(), EngineError> {
+        let event_details = self.get_event_details(Stage::Environment(EnvironmentStep::Pause));
         print_action(
             self.cloud_provider_name(),
             self.struct_name(),
             function_name!(),
             self.name(),
+            event_details,
+            self.logger(),
         );
 
         Ok(())
     }
 }
 
-impl Delete for Application {
+impl<'a> Delete for Application<'a> {
     #[named]
     fn on_delete(&self, target: &DeploymentTarget) -> Result<(), EngineError> {
         let event_details = self.get_event_details(Stage::Environment(EnvironmentStep::Delete));
@@ -374,10 +403,12 @@ impl Delete for Application {
             self.struct_name(),
             function_name!(),
             self.name(),
+            event_details.clone(),
+            self.logger(),
         );
 
         send_progress_on_long_task(self, crate::cloud_provider::service::Action::Delete, || {
-            delete_stateless_service(target, self, false, event_details.clone())
+            delete_stateless_service(target, self, false, event_details)
         })
     }
 
@@ -393,15 +424,17 @@ impl Delete for Application {
             self.struct_name(),
             function_name!(),
             self.name(),
+            event_details.clone(),
+            self.logger(),
         );
 
         send_progress_on_long_task(self, crate::cloud_provider::service::Action::Delete, || {
-            delete_stateless_service(target, self, true, event_details.clone())
+            delete_stateless_service(target, self, true, event_details)
         })
     }
 }
 
-impl Listen for Application {
+impl<'a> Listen for Application<'a> {
     fn listeners(&self) -> &Listeners {
         &self.listeners
     }

@@ -7,8 +7,9 @@ use uuid::Uuid;
 
 use crate::cloud_provider::{CloudProvider, Kind, TerraformStateCredentials};
 use crate::constants::DIGITAL_OCEAN_TOKEN;
-use crate::error::{EngineError, EngineErrorCause};
-use crate::models::{Context, Listen, Listener, Listeners};
+use crate::errors::EngineError;
+use crate::events::{EventDetails, GeneralStep, Stage};
+use crate::models::{Context, Listen, Listener, Listeners, QoveryIdentifier};
 
 pub mod application;
 pub mod databases;
@@ -100,16 +101,13 @@ impl CloudProvider for DO {
     }
 
     fn is_valid(&self) -> Result<(), EngineError> {
+        let event_details = self.get_event_details(Stage::General(GeneralStep::RetrieveClusterConfig));
         let client = DigitalOcean::new(&self.token);
         match client {
             Ok(_x) => Ok(()),
             Err(_) => {
-                return Err(self.engine_error(
-                    EngineErrorCause::User(
-                        "Your DigitalOcean account seems to be no longer valid (bad Credentials). \
-                    Please contact your Organization administrator to fix or change the Credentials.",
-                    ),
-                    format!("failed to login to Digital Ocean {}", self.name_with_id()),
+                return Err(EngineError::new_client_invalid_cloud_provider_credentials(
+                    event_details,
                 ));
             }
         }
@@ -133,6 +131,19 @@ impl CloudProvider for DO {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+
+    fn get_event_details(&self, stage: Stage) -> EventDetails {
+        let context = self.context();
+        EventDetails::new(
+            None,
+            QoveryIdentifier::from(context.organization_id().to_string()),
+            QoveryIdentifier::from(context.cluster_id().to_string()),
+            QoveryIdentifier::from(context.execution_id().to_string()),
+            None,
+            stage,
+            self.to_transmitter(),
+        )
     }
 }
 

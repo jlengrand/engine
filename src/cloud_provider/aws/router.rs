@@ -192,7 +192,15 @@ impl<'a> Service for Router<'a> {
                 Some(hostname) => context.insert("external_ingress_hostname_default", hostname.as_str()),
                 None => {
                     // TODO(benjaminch): Handle better this one via a proper error eventually
-                    self.logger().log(LogLevel::Warning, EngineEvent::Warning(event_details.clone(), EventMessage::new_from_safe("unable to get external_ingress_hostname_default - what's wrong? This must never happened".to_string())));
+                    self.logger().log(
+                        LogLevel::Warning,
+                        EngineEvent::Warning(
+                            event_details.clone(),
+                            EventMessage::new_from_safe(
+                                "Error while trying to get Load Balancer hostname from Kubernetes cluster".to_string(),
+                            ),
+                        ),
+                    );
                 }
             },
             _ => {
@@ -202,9 +210,7 @@ impl<'a> Service for Router<'a> {
                     LogLevel::Warning,
                     EngineEvent::Warning(
                         event_details.clone(),
-                        EventMessage::new_from_safe(
-                            "can't fetch kubernetes config file - what's wrong? This must never happened".to_string(),
-                        ),
+                        EventMessage::new_from_safe("Can't fetch external ingress hostname.".to_string()),
                     ),
                 );
             }

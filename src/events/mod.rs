@@ -5,7 +5,7 @@ pub mod io;
 extern crate url;
 
 use crate::cloud_provider::Kind;
-use crate::errors::EngineError;
+use crate::errors::{CommandError, EngineError};
 use crate::models::QoveryIdentifier;
 use std::fmt::{Display, Formatter};
 
@@ -139,6 +139,12 @@ impl EventMessage {
                 ),
             },
         }
+    }
+}
+
+impl From<CommandError> for EventMessage {
+    fn from(e: CommandError) -> Self {
+        EventMessage::new(e.message_raw(), e.message_safe())
     }
 }
 
@@ -449,7 +455,8 @@ mod tests {
     use crate::cloud_provider::Kind::Aws;
     use crate::errors::{CommandError, EngineError};
     use crate::events::{
-        EngineEvent, EnvironmentStep, EventDetails, EventMessage, InfrastructureStep, Stage, Transmitter,
+        EngineEvent, EnvironmentStep, EventDetails, EventMessage, EventMessageVerbosity, InfrastructureStep, Stage,
+        Transmitter,
     };
     use crate::models::QoveryIdentifier;
 

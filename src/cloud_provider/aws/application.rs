@@ -91,7 +91,7 @@ impl<'a> Application<'a> {
     }
 }
 
-impl<'a> crate::cloud_provider::service::Application<'a> for Application<'a> {
+impl<'a> crate::cloud_provider::service::Application for Application<'a> {
     fn image(&self) -> &Image {
         &self.image
     }
@@ -123,7 +123,7 @@ impl<'a> Helm for Application<'a> {
     }
 }
 
-impl<'a> StatelessService<'a> for Application<'a> {}
+impl<'a> StatelessService for Application<'a> {}
 
 impl<'a> ToTransmitter for Application<'a> {
     fn to_transmitter(&self) -> Transmitter {
@@ -303,7 +303,7 @@ impl<'a> Service for Application<'a> {
     }
 
     fn logger(&self) -> &dyn Logger {
-        todo!()
+        self.logger
     }
 
     fn selector(&self) -> Option<String> {

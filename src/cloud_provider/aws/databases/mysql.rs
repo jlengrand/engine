@@ -92,13 +92,13 @@ impl<'a> MySQL<'a> {
     }
 }
 
-impl StatefulService for MySQL {
+impl<'a> StatefulService for MySQL<'a> {
     fn is_managed_service(&self) -> bool {
         self.options.mode == MANAGED
     }
 }
 
-impl ToTransmitter for MySQL {
+impl<'a> ToTransmitter for MySQL<'a> {
     fn to_transmitter(&self) -> Transmitter {
         Transmitter::Database(
             self.id().to_string(),
@@ -108,7 +108,7 @@ impl ToTransmitter for MySQL {
     }
 }
 
-impl Service for MySQL {
+impl<'a> Service for MySQL<'a> {
     fn context(&self) -> &Context {
         &self.context
     }
@@ -190,7 +190,9 @@ impl Service for MySQL {
 
         context.insert("namespace", environment.namespace());
 
-        let version = &self.matching_correct_version(self.is_managed_service(), event_details.clone())?;
+        let version = &self
+            .matching_correct_version(self.is_managed_service(), event_details.clone())?
+            .matched_version();
         context.insert("version", &version);
 
         if self.is_managed_service() {
@@ -261,9 +263,9 @@ impl Service for MySQL {
     }
 }
 
-impl Database for MySQL {}
+impl<'a> Database for MySQL<'a> {}
 
-impl Helm for MySQL {
+impl<'a> Helm for MySQL<'a> {
     fn helm_selector(&self) -> Option<String> {
         self.selector()
     }
@@ -285,7 +287,7 @@ impl Helm for MySQL {
     }
 }
 
-impl Terraform for MySQL {
+impl<'a> Terraform for MySQL<'a> {
     fn terraform_common_resource_dir_path(&self) -> String {
         format!("{}/aws/services/common", self.context.lib_root_dir())
     }
@@ -295,7 +297,7 @@ impl Terraform for MySQL {
     }
 }
 
-impl Create for MySQL {
+impl<'a> Create for MySQL<'a> {
     #[named]
     fn on_create(&self, target: &DeploymentTarget) -> Result<(), EngineError> {
         let event_details = self.get_event_details(Stage::Environment(EnvironmentStep::Deploy));
@@ -304,12 +306,12 @@ impl Create for MySQL {
             self.struct_name(),
             function_name!(),
             self.name(),
-            event_details,
+            event_details.clone(),
             self.logger(),
         );
 
         send_progress_on_long_task(self, crate::cloud_provider::service::Action::Create, || {
-            deploy_stateful_service(target, self, event_details.clone(), self.logger)
+            deploy_stateful_service(target, self, event_details, self.logger())
         })
     }
 
@@ -333,7 +335,7 @@ impl Create for MySQL {
     }
 }
 
-impl Pause for MySQL {
+impl<'a> Pause for MySQL<'a> {
     #[named]
     fn on_pause(&self, target: &DeploymentTarget) -> Result<(), EngineError> {
         let event_details = self.get_event_details(Stage::Environment(EnvironmentStep::Pause));
@@ -370,7 +372,7 @@ impl Pause for MySQL {
     }
 }
 
-impl Delete for MySQL {
+impl<'a> Delete for MySQL<'a> {
     #[named]
     fn on_delete(&self, target: &DeploymentTarget) -> Result<(), EngineError> {
         let event_details = self.get_event_details(Stage::Environment(EnvironmentStep::Delete));
@@ -384,7 +386,7 @@ impl Delete for MySQL {
         );
 
         send_progress_on_long_task(self, crate::cloud_provider::service::Action::Delete, || {
-            delete_stateful_service(target, self, event_details, self.logger)
+            delete_stateful_service(target, self, event_details, self.logger())
         })
     }
 
@@ -407,7 +409,7 @@ impl Delete for MySQL {
     }
 }
 
-impl Listen for MySQL {
+impl<'a> Listen for MySQL<'a> {
     fn listeners(&self) -> &Listeners {
         &self.listeners
     }

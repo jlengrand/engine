@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-use crate::cloud_provider::models::CpuLimits;
 use crate::error::{EngineError, StringError};
 use crate::errors::CommandError;
 use crate::events::{EngineEvent, EventDetails, EventMessage};
@@ -14,7 +13,6 @@ use retry::delay::Fixed;
 use retry::OperationResult;
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::num::ParseFloatError;
 use std::str::FromStr;
 use trust_dns_resolver::config::*;
 use trust_dns_resolver::proto::rr::{RData, RecordType};

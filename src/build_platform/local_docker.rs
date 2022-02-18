@@ -7,9 +7,11 @@ use sysinfo::{Disk, DiskExt, SystemExt};
 
 use crate::build_platform::{docker, Build, BuildPlatform, BuildResult, CacheResult, Credentials, Image, Kind};
 use crate::cmd::utilities::QoveryCommand;
-use crate::error::{EngineError, EngineErrorCause, EngineErrorScope, SimpleError, SimpleErrorKind};
+use crate::errors::{CommandError, EngineError};
+use crate::events::{EngineEvent, EventDetails, EventMessage, ToTransmitter, Transmitter};
 use crate::fs::workspace_directory;
 use crate::git;
+use crate::logger::{LogLevel, Logger};
 use crate::models::{
     Context, Listen, Listener, Listeners, ListenersHelper, ProgressInfo, ProgressLevel, ProgressScope,
 };
@@ -25,20 +27,22 @@ const BUILDPACKS_BUILDERS: [&str; 1] = [
 ];
 
 /// use Docker in local
-pub struct LocalDocker {
+pub struct LocalDocker<'a> {
     context: Context,
     id: String,
     name: String,
     listeners: Listeners,
+    logger: &'a dyn Logger,
 }
 
-impl LocalDocker {
-    pub fn new(context: Context, id: &str, name: &str) -> Self {
+impl<'a> LocalDocker<'a> {
+    pub fn new(context: Context, id: &str, name: &str, logger: &'a dyn Logger) -> Self {
         LocalDocker {
             context,
             id: id.to_string(),
             name: name.to_string(),
             listeners: vec![],
+            logger,
         }
     }
 
@@ -64,9 +68,14 @@ impl LocalDocker {
         match fs::read(dockerfile_path) {
             Ok(bytes) => Ok(bytes),
             Err(err) => {
-                let error_msg = format!("Can't read Dockerfile '{}'", dockerfile_path);
-                error!("{}, error: {:?}", error_msg, err);
-                Err(self.engine_error(EngineErrorCause::Internal, error_msg))
+                let engine_error = EngineError::new_docker_cannot_read_dockerfile(
+                    self.get_event_details(),
+                    dockerfile_path.to_string(),
+                    CommandError::new(err.to_string(), None),
+                );
+                self.logger
+                    .log(LogLevel::Error, EngineEvent::Error(engine_error.clone(), None));
+                Err(engine_error)
             }
         }
     }
@@ -101,9 +110,14 @@ impl LocalDocker {
         let env_var_args = match docker::match_used_env_var_args(env_var_args, dockerfile_content) {
             Ok(env_var_args) => env_var_args,
             Err(err) => {
-                let error_msg = format!("Can't extract env vars from Dockerfile '{}'", dockerfile_complete_path);
-                error!("{}, error: {:?}", error_msg, err);
-                return Err(self.engine_error(EngineErrorCause::Internal, error_msg));
+                let engine_error = EngineError::new_docker_cannot_extract_env_vars_from_dockerfile(
+                    self.get_event_details(),
+                    dockerfile_complete_path.to_string(),
+                    CommandError::new(err.to_string(), None),
+                );
+                self.logger
+                    .log(LogLevel::Error, EngineEvent::Error(engine_error.clone(), None));
+                Err(engine_error)
             }
         };
 
@@ -129,7 +143,10 @@ impl LocalDocker {
         let exit_status = cmd.exec_with_timeout(
             Duration::minutes(BUILD_DURATION_TIMEOUT_MIN),
             |line| {
-                info!("{}", line);
+                self.logger.log(
+                    LogLevel::Info,
+                    EngineEvent::Info(self.get_event_details(), EventMessage::new_from_safe(line.to_string())),
+                );
 
                 lh.deployment_in_progress(ProgressInfo::new(
                     ProgressScope::Application {
@@ -141,7 +158,10 @@ impl LocalDocker {
                 ));
             },
             |line| {
-                error!("{}", line);
+                self.logger.log(
+                    LogLevel::Warning,
+                    EngineEvent::Warning(self.get_event_details(), EventMessage::new_from_safe(line.to_string())),
+                );
 
                 lh.deployment_in_progress(ProgressInfo::new(
                     ProgressScope::Application {
@@ -156,15 +176,10 @@ impl LocalDocker {
 
         match exit_status {
             Ok(_) => Ok(BuildResult { build }),
-            Err(err) => Err(self.engine_error(
-                EngineErrorCause::User(
-                    "It looks like there is something wrong in your Dockerfile. Try building the application locally with `docker build --no-cache`.",
-                ),
-                format!(
-                    "error while building container image {}. Error: {:?}",
-                    self.name_with_id(),
-                    err
-                ),
+            Err(err) => Err(EngineError::new_docker_cannot_build_container_image(
+                self.get_event_details(),
+                self.name_with_id(),
+                CommandError::new(format!("{:?}", err), None),
             )),
         }
     }
@@ -181,8 +196,8 @@ impl LocalDocker {
 
         let args = self.context.docker_build_options();
 
-        let mut exit_status: Result<(), SimpleError> =
-            Err(SimpleError::new(SimpleErrorKind::Other, Some("no builder names")));
+        let mut exit_status: Result<(), CommandError> =
+            Err(CommandError::new_from_safe_message("No builder names".to_string()));
 
         for builder_name in BUILDPACKS_BUILDERS.iter() {
             let mut buildpacks_args = if !use_build_cache {
@@ -245,12 +260,13 @@ impl LocalDocker {
                             self.context.execution_id(),
                         ));
 
-                        let err = EngineError::new(
-                            EngineErrorCause::Internal,
-                            EngineErrorScope::Engine,
-                            self.context.execution_id().to_string(),
-                            Some(msg),
+                        let err = EngineError::new_buildpack_invalid_language_format(
+                            self.get_event_details(),
+                            buildpacks_language.to_string(),
                         );
+
+                        self.logger.log(LogLevel::Error, EngineEvent::Error(err.clone(), None));
+
                         return Err(err);
                     }
                 }
@@ -272,7 +288,10 @@ impl LocalDocker {
                 .exec_with_timeout(
                     Duration::minutes(BUILD_DURATION_TIMEOUT_MIN),
                     |line| {
-                        info!("{}", line);
+                        self.logger.log(
+                            LogLevel::Info,
+                            EngineEvent::Info(self.get_event_details(), EventMessage::new_from_safe(line.to_string())),
+                        );
 
                         lh.deployment_in_progress(ProgressInfo::new(
                             ProgressScope::Application {
@@ -284,7 +303,13 @@ impl LocalDocker {
                         ));
                     },
                     |line| {
-                        error!("{}", line);
+                        self.logger.log(
+                            LogLevel::Warning,
+                            EngineEvent::Warning(
+                                self.get_event_details(),
+                                EventMessage::new_from_safe(line.to_string()),
+                            ),
+                        );
 
                         lh.deployment_in_progress(ProgressInfo::new(
                             ProgressScope::Application {
@@ -296,7 +321,7 @@ impl LocalDocker {
                         ));
                     },
                 )
-                .map_err(|err| SimpleError::new(SimpleErrorKind::Other, Some(format!("{:?}", err))));
+                .map_err(|err| CommandError::new(format!("{:?}", err), None));
 
             if exit_status.is_ok() {
                 // quit now if the builder successfully build the app
@@ -307,19 +332,17 @@ impl LocalDocker {
         match exit_status {
             Ok(_) => Ok(BuildResult { build }),
             Err(err) => {
-                warn!("{:?}", err);
+                let error = EngineError::new_buildpack_cannot_build_container_image(
+                    self.get_event_details(),
+                    self.name_with_id(),
+                    BUILDPACKS_BUILDERS.iter().map(|b| b.to_string()).collect(),
+                    CommandError::new(format!("{:?}", err), None),
+                );
 
-                Err(self.engine_error(
-                    EngineErrorCause::User(
-                        "None builders supports Your application can't be built without providing a Dockerfile",
-                    ),
-                    format!(
-                        "Qovery can't build your container image {} with one of the following builders: {}. \
-                    Please do provide a valid Dockerfile to build your application or contact the support.",
-                        self.name_with_id(),
-                        BUILDPACKS_BUILDERS.join(", ")
-                    ),
-                ))
+                self.logger
+                    .log(LogLevel::Error, EngineEvent::Error(error.clone(), None));
+
+                Err(error)
             }
         }
     }
@@ -330,7 +353,12 @@ impl LocalDocker {
             self.context.execution_id(),
             format!("build/{}", build.image.name.as_str()),
         )
-        .map_err(|err| self.engine_error(EngineErrorCause::Internal, err.to_string()))
+        .map_err(|err| {
+            EngineError::new_cannot_get_workspace_directory(
+                self.get_event_details(),
+                CommandError::new(err.to_string(), None),
+            )
+        })
     }
 }
 
@@ -353,11 +381,17 @@ impl BuildPlatform for LocalDocker {
 
     fn is_valid(&self) -> Result<(), EngineError> {
         if !crate::cmd::utilities::does_binary_exist("docker") {
-            return Err(self.engine_error(EngineErrorCause::Internal, String::from("docker binary not found")));
+            return Err(EngineError::new_missing_required_binary(
+                self.get_event_details(),
+                "docker".to_string(),
+            ));
         }
 
         if !crate::cmd::utilities::does_binary_exist("pack") {
-            return Err(self.engine_error(EngineErrorCause::Internal, String::from("pack binary not found")));
+            return Err(EngineError::new_missing_required_binary(
+                self.get_event_details(),
+                "pack".to_string(),
+            ));
         }
 
         Ok(())
@@ -369,9 +403,9 @@ impl BuildPlatform for LocalDocker {
         // Check if a local cache layers for the container image exists.
         let repository_root_path = self.get_repository_build_root_path(&build)?;
 
-        let parent_build = build
-            .to_previous_build(repository_root_path)
-            .map_err(|err| self.engine_error(EngineErrorCause::Internal, err.to_string()))?;
+        let parent_build = build.to_previous_build(repository_root_path).map_err(|err| {
+            EngineError::new_builder_get_build_error(self.get_event_details(), build.image.commit_id.to_string(), err)
+        })?;
 
         let parent_build = match parent_build {
             Some(parent_build) => parent_build,
@@ -449,8 +483,17 @@ impl BuildPlatform for LocalDocker {
                 "Error while cloning repository {}. Error: {:?}",
                 &build.git_repository.url, clone_error
             );
-            error!("{}", message);
-            return Err(self.engine_error(EngineErrorCause::Internal, message));
+
+            let error = EngineError::new_builder_clone_repository_error(
+                self.get_event_details(),
+                build.git_repository.url.to_string(),
+                CommandError::new(clone_error.to_string(), None),
+            );
+
+            self.logger
+                .log(LogLevel::Error, EngineEvent::Error(error.clone(), None));
+
+            return Err(error);
         }
 
         let mut disable_build_cache = false;
@@ -481,9 +524,20 @@ impl BuildPlatform for LocalDocker {
 
                 for disk in system.get_disks() {
                     if disk.get_mount_point() == docker_path {
-                        match check_docker_space_usage_and_clean(disk, self.get_docker_host_envs()) {
-                            Ok(msg) => info!("{:?}", msg),
-                            Err(e) => error!("{:?}", e.message),
+                        let event_details = self.get_event_details();
+                        if let Err(e) = check_docker_space_usage_and_clean(
+                            disk,
+                            self.get_docker_host_envs(),
+                            event_details.clone(),
+                            self.logger(),
+                        ) {
+                            self.logger.log(
+                                LogLevel::Warning,
+                                EngineEvent::Warning(
+                                    event_details.clone(),
+                                    EventMessage::new(e.message_raw(), e.message_safe()),
+                                ),
+                            );
                         }
                         break;
                     };
@@ -508,7 +562,6 @@ impl BuildPlatform for LocalDocker {
 
             // If the dockerfile does not exist, abort
             if !Path::new(dockerfile_absolute_path.as_str()).exists() {
-                warn!("Dockerfile not found under {}", dockerfile_absolute_path);
                 listeners_helper.error(ProgressInfo::new(
                     ProgressScope::Application {
                         id: build.image.application_id.clone(),
@@ -521,14 +574,13 @@ impl BuildPlatform for LocalDocker {
                     self.context.execution_id(),
                 ));
 
-                return Err(self.engine_error(
-                    EngineErrorCause::User("Dockerfile not found at location"),
-                    format!(
-                        "Your Dockerfile is not present at the specified location {}/{}",
-                        build.git_repository.root_path.as_str(),
-                        build.git_repository.dockerfile_path.unwrap_or_default().as_str()
-                    ),
-                ));
+                let error =
+                    EngineError::new_docker_cannot_find_dockerfile(self.get_event_details(), dockerfile_absolute_path);
+
+                self.logger
+                    .log(LogLevel::Error, EngineEvent::Error(error.clone(), None));
+
+                return Err(error);
             }
 
             self.build_image_with_docker(
@@ -561,7 +613,14 @@ impl BuildPlatform for LocalDocker {
     }
 
     fn build_error(&self, build: Build) -> Result<BuildResult, EngineError> {
-        warn!("LocalDocker.build_error() called for {}", self.name());
+        let event_details = self.get_event_details();
+        self.logger.log(
+            LogLevel::Warning,
+            EngineEvent::Warning(
+                event_details.clone(),
+                EventMessage::new_from_safe(format!("LocalDocker.build_error() called for {}", self.name())),
+            ),
+        );
 
         let listener_helper = ListenersHelper::new(&self.listeners);
 
@@ -578,7 +637,11 @@ impl BuildPlatform for LocalDocker {
         ));
 
         // FIXME
-        Err(self.engine_error(EngineErrorCause::Internal, message))
+        Err(EngineError::new_not_implemented_error(event_details))
+    }
+
+    fn logger(&self) -> &dyn Logger {
+        self.logger
     }
 }
 
@@ -592,38 +655,54 @@ impl Listen for LocalDocker {
     }
 }
 
+impl ToTransmitter for LocalDocker {
+    fn to_transmitter(&self) -> Transmitter {
+        Transmitter::BuildPlatform(self.id().to_string(), self.name().to_string())
+    }
+}
+
 fn check_docker_space_usage_and_clean(
     docker_path_size_info: &Disk,
     envs: Vec<(&str, &str)>,
-) -> Result<String, SimpleError> {
+    event_details: EventDetails,
+    logger: &dyn Logger,
+) -> Result<(), CommandError> {
     let docker_max_disk_percentage_usage_before_purge = 60; // arbitrary percentage that should make the job anytime
     let available_space = docker_path_size_info.get_available_space();
     let docker_percentage_remaining = available_space * 100 / docker_path_size_info.get_total_space();
 
     if docker_percentage_remaining < docker_max_disk_percentage_usage_before_purge || available_space == 0 {
-        warn!(
-            "Docker disk remaining ({}%) is lower than {}%, requesting cleaning (purge)",
-            docker_percentage_remaining, docker_max_disk_percentage_usage_before_purge
+        logger.log(
+            LogLevel::Warning,
+            EngineEvent::Warning(
+                event_details.clone(),
+                EventMessage::new_from_safe(format!(
+                    "Docker disk remaining ({}%) is lower than {}%, requesting cleaning (purge)",
+                    docker_percentage_remaining, docker_max_disk_percentage_usage_before_purge
+                )),
+            ),
         );
 
-        return match docker_prune_images(envs) {
-            Err(e) => {
-                error!("error while purging docker images: {:?}", e.message);
-                Err(e)
-            }
-            _ => Ok("docker images have been purged".to_string()),
-        };
+        return docker_prune_images(envs);
     };
 
-    Ok(format!(
-        "no need to purge old docker images, only {}% ({}/{}) disk used",
-        100 - docker_percentage_remaining,
-        docker_path_size_info.get_available_space(),
-        docker_path_size_info.get_total_space(),
-    ))
+    logger.log(
+        LogLevel::Info,
+        EngineEvent::Info(
+            event_details.clone(),
+            EventMessage::new_from_safe(format!(
+                "No need to purge old docker images, only {}% ({}/{}) disk used",
+                100 - docker_percentage_remaining,
+                docker_path_size_info.get_available_space(),
+                docker_path_size_info.get_total_space(),
+            )),
+        ),
+    );
+
+    Ok(())
 }
 
-fn docker_prune_images(envs: Vec<(&str, &str)>) -> Result<(), SimpleError> {
+fn docker_prune_images(envs: Vec<(&str, &str)>) -> Result<(), CommandError> {
     let all_prunes_commands = vec![
         vec!["container", "prune", "-f"],
         vec!["image", "prune", "-a", "-f"],
@@ -631,20 +710,19 @@ fn docker_prune_images(envs: Vec<(&str, &str)>) -> Result<(), SimpleError> {
         vec!["volume", "prune", "-f"],
     ];
 
+    let mut errored_commands = vec![];
     for prune in all_prunes_commands {
         let mut cmd = QoveryCommand::new("docker", &prune, &envs);
-        match cmd.exec_with_timeout(
-            Duration::minutes(BUILD_DURATION_TIMEOUT_MIN),
-            |line| {
-                debug!("{}", line);
-            },
-            |line| {
-                debug!("{}", line);
-            },
-        ) {
-            Ok(_) => {}
-            Err(e) => error!("error while puring {}. {:?}", prune[0], e),
-        };
+        if let Err(e) = cmd.exec_with_timeout(Duration::minutes(BUILD_DURATION_TIMEOUT_MIN), |_| {}, |_| {}) {
+            errored_commands.push(format!("{} {:?}", prune[0], e));
+        }
+    }
+
+    if errored_commands.len() > 0 {
+        return Err(CommandError::new(
+            errored_commands.join("/ "),
+            Some("Error while trying to prune images.".to_string()),
+        ));
     }
 
     Ok(())

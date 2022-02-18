@@ -12,7 +12,7 @@ use rusoto_s3::{
 use tokio::io;
 
 use crate::cloud_provider::digitalocean::application::DoRegion;
-use crate::error::{EngineError, EngineErrorCause};
+use crate::errors::EngineError;
 use crate::models::{Context, StringPath};
 use crate::object_storage::{Kind, ObjectStorage};
 use crate::runtime;

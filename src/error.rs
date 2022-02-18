@@ -68,6 +68,7 @@ pub enum EngineErrorCause {
 }
 
 #[derive(Debug)]
+#[deprecated(note = "errors.CommandError to be used instead")]
 pub struct SimpleError {
     pub kind: SimpleErrorKind,
     pub message: Option<String>,

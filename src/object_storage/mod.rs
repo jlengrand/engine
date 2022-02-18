@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::error::{EngineError, EngineErrorCause, EngineErrorScope};
+use crate::errors::EngineError;
 use crate::models::{Context, StringPath};
 use std::fs::File;
 
@@ -21,17 +21,6 @@ pub trait ObjectStorage {
     fn delete_bucket(&self, bucket_name: &str) -> Result<(), EngineError>;
     fn get(&self, bucket_name: &str, object_key: &str, use_cache: bool) -> Result<(StringPath, File), EngineError>;
     fn put(&self, bucket_name: &str, object_key: &str, file_path: &str) -> Result<(), EngineError>;
-    fn engine_error_scope(&self) -> EngineErrorScope {
-        EngineErrorScope::ObjectStorage(self.id().to_string(), self.name().to_string())
-    }
-    fn engine_error(&self, cause: EngineErrorCause, message: String) -> EngineError {
-        EngineError::new(
-            cause,
-            self.engine_error_scope(),
-            self.context().execution_id(),
-            Some(message),
-        )
-    }
 }
 
 #[derive(Serialize, Deserialize, Clone)]

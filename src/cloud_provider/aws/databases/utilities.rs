@@ -1,5 +1,4 @@
 use crate::cloud_provider::utilities::VersionsNumber;
-use crate::error::StringError;
 use crate::errors::CommandError;
 use crate::models::DatabaseKind;
 use std::str::FromStr;

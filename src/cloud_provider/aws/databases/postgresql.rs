@@ -190,7 +190,9 @@ impl<'a> Service for PostgreSQL<'a> {
 
         context.insert("namespace", environment.namespace());
 
-        let version = self.matching_correct_version(self.is_managed_service(), event_details.clone())?;
+        let version = self
+            .matching_correct_version(self.is_managed_service(), event_details.clone())?
+            .matched_version();
         context.insert("version", &version);
 
         for (k, v) in kubernetes.cloud_provider().tera_context_environment_variables() {
@@ -294,7 +296,7 @@ impl<'a> Create for PostgreSQL<'a> {
         );
 
         send_progress_on_long_task(self, crate::cloud_provider::service::Action::Create, || {
-            deploy_stateful_service(target, self, event_details, self.logger)
+            deploy_stateful_service(target, self, event_details, self.logger())
         })
     }
 
@@ -370,7 +372,7 @@ impl<'a> Delete for PostgreSQL<'a> {
         );
 
         send_progress_on_long_task(self, crate::cloud_provider::service::Action::Delete, || {
-            delete_stateful_service(target, self, event_details, self.logger)
+            delete_stateful_service(target, self, event_details, self.logger())
         })
     }
 
@@ -386,7 +388,7 @@ impl<'a> Delete for PostgreSQL<'a> {
             self.struct_name(),
             function_name!(),
             self.name(),
-            event_details.clone(),
+            event_details,
             self.logger(),
         );
 

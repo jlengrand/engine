@@ -204,6 +204,46 @@ pub enum Tag {
     DatabaseFailedToStartAfterSeveralRetries,
     /// RouterFailedToDeploy: represents an error while trying to deploy a router.
     RouterFailedToDeploy,
+    /// CloudProviderClientInvalidCredentials: represents an error where client credentials for a cloud providers appear to be invalid.
+    CloudProviderClientInvalidCredentials,
+    /// BuilderDockerCannotFindAnyDockerfile: represents an error when trying to get a Dockerfile.
+    BuilderDockerCannotFindAnyDockerfile,
+    /// BuilderDockerCannotReadDockerfile: represents an error while trying to read Dockerfile.
+    BuilderDockerCannotReadDockerfile,
+    /// BuilderDockerCannotExtractEnvVarsFromDockerfile: represents an error while trying to extract ENV vars from Dockerfile.
+    BuilderDockerCannotExtractEnvVarsFromDockerfile,
+    /// BuilderDockerCannotBuildContainerImage: represents an error while trying to build Docker container image.
+    BuilderDockerCannotBuildContainerImage,
+    /// BuilderBuildpackInvalidLanguageFormat: represents an error where buildback requested language has wrong format.
+    BuilderBuildpackInvalidLanguageFormat,
+    /// BuilderBuildpackCannotBuildContainerImage: represents an error while trying to build container image with Buildpack.
+    BuilderBuildpackCannotBuildContainerImage,
+    /// BuilderGetBuildError: represents an error when builder is trying to get parent build.
+    BuilderGetBuildError,
+    /// BuilderCloningRepositoryError: represents an error when builder is trying to clone a git repository.
+    BuilderCloningRepositoryError,
+    /// DockerPushImageError: represents an error when trying to push a docker image.
+    DockerPushImageError,
+    /// DockerPullImageError: represents an error when trying to pull a docker image.
+    DockerPullImageError,
+    /// ContainerRegistryRepositoryCreationError: represents an error when trying to create a repository.
+    ContainerRegistryRepositoryCreationError,
+    /// ContainerRegistryRepositorySetLifecycleError: represents an error when trying to set repository lifecycle policy.
+    ContainerRegistryRepositorySetLifecycleError,
+    /// ContainerRegistryGetCredentialsError: represents an error when trying to get container registry credentials.
+    ContainerRegistryGetCredentialsError,
+    /// ContainerRegistryDeleteImageError: represents an error while trying to delete an image.
+    ContainerRegistryDeleteImageError,
+    /// ContainerRegistryImageDoesntExist: represents an error, image doesn't exist in the registry.
+    ContainerRegistryImageDoesntExist,
+    /// ContainerRegistryImageUnreachableAfterPush: represents an error when image has been pushed but is unreachable.
+    ContainerRegistryImageUnreachableAfterPush,
+    /// ContainerRegistryRepositoryDoesntExist: represents an error, repository doesn't exist.
+    ContainerRegistryRepositoryDoesntExist,
+    /// ContainerRegistryDeleteRepositoryError: represents an error while trying to delete a repository.
+    ContainerRegistryDeleteRepositoryError,
+    /// NotImplementedError: represents an error where feature / code has not been implemented yet.
+    NotImplementedError,
 }
 
 #[derive(Clone, Debug)]
@@ -1848,6 +1888,514 @@ impl EngineError {
             message.to_string(),
             message.to_string(),
             None,
+            None,
+            None,
+        )
+    }
+
+    /// Creates new error when trying to connect to user's account with its credentials.
+    ///
+    /// Arguments:
+    ///
+    /// * `event_details`: Error linked event details.
+    pub fn new_client_invalid_cloud_provider_credentials(event_details: EventDetails) -> EngineError {
+        let message = "Your cloud provider account seems to be no longer valid (bad credentials).";
+
+        EngineError::new(
+            event_details,
+            Tag::CloudProviderClientInvalidCredentials,
+            message.to_string(),
+            message.to_string(),
+            None,
+            None,
+            Some("Please contact your Organization administrator to fix or change the Credentials.".to_string()),
+        )
+    }
+
+    /// Creates new error when trying to read Dockerfile content.
+    ///
+    /// Arguments:
+    ///
+    /// * `event_details`: Error linked event details.
+    /// * `dockerfile_path`: Dockerfile path.
+    /// * `raw_error`: Raw error message.
+    pub fn new_docker_cannot_read_dockerfile(
+        event_details: EventDetails,
+        dockerfile_path: String,
+        raw_error: CommandError,
+    ) -> EngineError {
+        let message = format!("Can't read Dockerfile `{}`.", dockerfile_path);
+
+        EngineError::new(
+            event_details,
+            Tag::BuilderDockerCannotReadDockerfile,
+            message.to_string(),
+            message.to_string(),
+            Some(raw_error),
+            None,
+            None,
+        )
+    }
+
+    /// Creates new error when trying to extract env vars from Dockerfile.
+    ///
+    /// Arguments:
+    ///
+    /// * `event_details`: Error linked event details.
+    /// * `dockerfile_path`: Dockerfile path.
+    /// * `raw_error`: Raw error message.
+    pub fn new_docker_cannot_extract_env_vars_from_dockerfile(
+        event_details: EventDetails,
+        dockerfile_path: String,
+        raw_error: CommandError,
+    ) -> EngineError {
+        let message = format!("Can't extract ENV vars from Dockerfile `{}`.", dockerfile_path);
+
+        EngineError::new(
+            event_details,
+            Tag::BuilderDockerCannotExtractEnvVarsFromDockerfile,
+            message.to_string(),
+            message.to_string(),
+            Some(raw_error),
+            None,
+            None,
+        )
+    }
+
+    /// Creates new error when trying to build Docker container.
+    ///
+    /// Arguments:
+    ///
+    /// * `event_details`: Error linked event details.
+    /// * `container_image_name`: Container image name.
+    /// * `raw_error`: Raw error message.
+    pub fn new_docker_cannot_build_container_image(
+        event_details: EventDetails,
+        container_image_name: String,
+        raw_error: CommandError,
+    ) -> EngineError {
+        let message = format!("Error while building container image `{}`.", container_image_name);
+
+        EngineError::new(
+            event_details,
+            Tag::BuilderDockerCannotBuildContainerImage,
+            message.to_string(),
+            message.to_string(),
+            Some(raw_error),
+            None,
+            Some("It looks like there is something wrong in your Dockerfile. Try building the application locally with `docker build --no-cache`.".to_string()),
+        )
+    }
+
+    /// Creates new error when trying to get Dockerfile.
+    ///
+    /// Arguments:
+    ///
+    /// * `event_details`: Error linked event details.
+    /// * `location_path`: Dockerfile location path.
+    pub fn new_docker_cannot_find_dockerfile(event_details: EventDetails, location_path: String) -> EngineError {
+        let message = format!("Dockerfile not found at location `{}`.", location_path);
+
+        EngineError::new(
+            event_details,
+            Tag::BuilderDockerCannotFindAnyDockerfile,
+            message.to_string(),
+            message.to_string(),
+            None,
+            None,
+            Some("Your Dockerfile is not present at the specified location, check your settings.".to_string()),
+        )
+    }
+
+    /// Creates new error buildpack invalid language format.
+    ///
+    /// Arguments:
+    ///
+    /// * `event_details`: Error linked event details.
+    /// * `requested_language`: Requested language.
+    pub fn new_buildpack_invalid_language_format(
+        event_details: EventDetails,
+        requested_language: String,
+    ) -> EngineError {
+        let message = format!(
+            "Cannot build: Invalid buildpacks language format: `{}`.",
+            requested_language
+        );
+
+        EngineError::new(
+            event_details,
+            Tag::BuilderBuildpackInvalidLanguageFormat,
+            message.to_string(),
+            message.to_string(),
+            None,
+            None,
+            Some("Expected format `builder[@version]`.".to_string()),
+        )
+    }
+
+    /// Creates new error when trying to build container.
+    ///
+    /// Arguments:
+    ///
+    /// * `event_details`: Error linked event details.
+    /// * `container_image_name`: Container image name.
+    /// * `raw_error`: Raw error message.
+    pub fn new_buildpack_cannot_build_container_image(
+        event_details: EventDetails,
+        container_image_name: String,
+        builders: Vec<String>,
+        raw_error: CommandError,
+    ) -> EngineError {
+        let message = "Cannot find a builder to build application.";
+
+        EngineError::new(
+            event_details,
+            Tag::BuilderBuildpackCannotBuildContainerImage,
+            message.to_string(),
+            message.to_string(),
+            Some(raw_error),
+            None,
+            Some(format!(
+                "Qovery can't build your container image {} with one of the following builders: {}. Please do provide a valid Dockerfile to build your application or contact the support.",
+                container_image_name,
+                builders.join(", ")
+            ),),
+        )
+    }
+
+    /// Creates new error when trying to get build.
+    ///
+    /// Arguments:
+    ///
+    /// * `event_details`: Error linked event details.
+    /// * `commit_id`: Commit ID of build to be retrieved.
+    /// * `raw_error`: Raw error message.
+    pub fn new_builder_get_build_error(
+        event_details: EventDetails,
+        commit_id: String,
+        raw_error: CommandError,
+    ) -> EngineError {
+        let message = format!("Error while trying to get build with commit ID: `{}`.", commit_id);
+
+        EngineError::new(
+            event_details,
+            Tag::BuilderGetBuildError,
+            message.to_string(),
+            message.to_string(),
+            Some(raw_error),
+            None,
+            None,
+        )
+    }
+
+    /// Creates new error when builder is trying to clone a git repository.
+    ///
+    /// Arguments:
+    ///
+    /// * `event_details`: Error linked event details.
+    /// * `repository_url`: Repository URL.
+    /// * `raw_error`: Raw error message.
+    pub fn new_builder_clone_repository_error(
+        event_details: EventDetails,
+        repository_url: String,
+        raw_error: CommandError,
+    ) -> EngineError {
+        let message = format!("Error while cloning repository `{}`.", repository_url);
+
+        EngineError::new(
+            event_details,
+            Tag::BuilderCloningRepositoryError,
+            message.to_string(),
+            message.to_string(),
+            Some(raw_error),
+            None,
+            None,
+        )
+    }
+
+    /// Creates new error when something went wrong because it's not implemented.
+    ///
+    /// Arguments:
+    ///
+    /// * `event_details`: Error linked event details.
+    pub fn new_not_implemented_error(event_details: EventDetails) -> EngineError {
+        let message = "Error, something went wrong because it's not implemented.";
+
+        EngineError::new(
+            event_details,
+            Tag::NotImplementedError,
+            message.to_string(),
+            message.to_string(),
+            None,
+            None,
+            None,
+        )
+    }
+
+    /// Creates new error when trying to push a Docker image.
+    ///
+    /// Arguments:
+    ///
+    /// * `event_details`: Error linked event details.
+    /// * `image_name`: Docker image name.
+    /// * `repository_url`: Repository URL.
+    /// * `raw_error`: Raw error message.
+    pub fn new_docker_push_image_error(
+        event_details: EventDetails,
+        image_name: String,
+        repository_url: String,
+        raw_error: CommandError,
+    ) -> EngineError {
+        let message = format!(
+            "Error, trying to push Docker image `{}` to repository `{}`.",
+            image_name, repository_url
+        );
+
+        EngineError::new(
+            event_details,
+            Tag::DockerPushImageError,
+            message.to_string(),
+            message.to_string(),
+            Some(raw_error),
+            None,
+            None,
+        )
+    }
+
+    /// Creates new error when trying to pull a Docker image.
+    ///
+    /// Arguments:
+    ///
+    /// * `event_details`: Error linked event details.
+    /// * `image_name`: Docker image name.
+    /// * `repository_url`: Repository URL.
+    /// * `raw_error`: Raw error message.
+    pub fn new_docker_pull_image_error(
+        event_details: EventDetails,
+        image_name: String,
+        repository_url: String,
+        raw_error: CommandError,
+    ) -> EngineError {
+        let message = format!(
+            "Error, trying to pull Docker image `{}` from repository `{}`.",
+            image_name, repository_url
+        );
+
+        EngineError::new(
+            event_details,
+            Tag::DockerPullImageError,
+            message.to_string(),
+            message.to_string(),
+            Some(raw_error),
+            None,
+            None,
+        )
+    }
+
+    /// Creates new error when trying to create a new container registry namespace.
+    ///
+    /// Arguments:
+    ///
+    /// * `event_details`: Error linked event details.
+    /// * `repository_name`: Container repository name.
+    /// * `registry_name`: Registry to be created.
+    /// * `raw_error`: Raw error message.
+    pub fn new_container_registry_namespace_creation_error(
+        event_details: EventDetails,
+        repository_name: String,
+        registry_name: String,
+        raw_error: CommandError,
+    ) -> EngineError {
+        let message = format!(
+            "Error, trying to create registry `{}` in `{}`.",
+            registry_name, repository_name
+        );
+
+        EngineError::new(
+            event_details,
+            Tag::ContainerRegistryRepositoryCreationError,
+            message.to_string(),
+            message.to_string(),
+            Some(raw_error),
+            None,
+            None,
+        )
+    }
+
+    /// Creates new error when trying to set container repository lifecycle policy.
+    ///
+    /// Arguments:
+    ///
+    /// * `event_details`: Error linked event details.
+    /// * `repository_name`: Repository name.
+    /// * `raw_error`: Raw error message.
+    pub fn new_container_registry_repository_set_lifecycle_policy_error(
+        event_details: EventDetails,
+        repository_name: String,
+        raw_error: CommandError,
+    ) -> EngineError {
+        let message = format!(
+            "Error, trying to set lifecycle policy repository `{}`.",
+            repository_name,
+        );
+
+        EngineError::new(
+            event_details,
+            Tag::ContainerRegistryRepositorySetLifecycleError,
+            message.to_string(),
+            message.to_string(),
+            Some(raw_error),
+            None,
+            None,
+        )
+    }
+
+    /// Creates new error when trying to get container registry credentials.
+    ///
+    /// Arguments:
+    ///
+    /// * `event_details`: Error linked event details.
+    /// * `repository_name`: Repository name.
+    pub fn new_container_registry_get_credentials_error(
+        event_details: EventDetails,
+        repository_name: String,
+    ) -> EngineError {
+        let message = format!(
+            "Failed to retrieve credentials and endpoint URL from container registry `{}`.",
+            repository_name,
+        );
+
+        EngineError::new(
+            event_details,
+            Tag::ContainerRegistryGetCredentialsError,
+            message.to_string(),
+            message.to_string(),
+            None,
+            None,
+            None,
+        )
+    }
+
+    /// Creates new error when trying to delete an image.
+    ///
+    /// Arguments:
+    ///
+    /// * `event_details`: Error linked event details.
+    /// * `image_name`: Image name.
+    /// * `raw_error`: Raw error message.
+    pub fn new_container_registry_delete_image_error(
+        event_details: EventDetails,
+        image_name: String,
+        raw_error: Option<CommandError>,
+    ) -> EngineError {
+        let message = format!("Failed to delete image `{}`.", image_name,);
+
+        EngineError::new(
+            event_details,
+            Tag::ContainerRegistryDeleteImageError,
+            message.to_string(),
+            message.to_string(),
+            raw_error,
+            None,
+            None,
+        )
+    }
+
+    /// Creates new error when trying to get image from a registry.
+    ///
+    /// Arguments:
+    ///
+    /// * `event_details`: Error linked event details.
+    /// * `image_name`: Image name.
+    pub fn new_container_registry_image_doesnt_exist(
+        event_details: EventDetails,
+        image_name: String,
+        raw_error: Option<CommandError>,
+    ) -> EngineError {
+        let message = format!("Image `{}` doesn't exists.", image_name,);
+
+        EngineError::new(
+            event_details,
+            Tag::ContainerRegistryImageDoesntExist,
+            message.to_string(),
+            message.to_string(),
+            raw_error,
+            None,
+            None,
+        )
+    }
+
+    /// Creates new error when image is unreachable after push.
+    ///
+    /// Arguments:
+    ///
+    /// * `event_details`: Error linked event details.
+    /// * `image_name`: Image name.
+    /// * `raw_error`: Raw error message.
+    pub fn new_container_registry_image_unreachable_after_push(
+        event_details: EventDetails,
+        image_name: String,
+    ) -> EngineError {
+        let message = format!(
+            "Image `{}` has been pushed on registry namespace but is not yet available after some time.",
+            image_name,
+        );
+
+        EngineError::new(
+            event_details,
+            Tag::ContainerRegistryImageUnreachableAfterPush,
+            message.to_string(),
+            message.to_string(),
+            None,
+            None,
+            Some("Please try to redeploy in a few minutes.".to_string()),
+        )
+    }
+
+    /// Creates new error when trying to get image from a registry.
+    ///
+    /// Arguments:
+    ///
+    /// * `event_details`: Error linked event details.
+    /// * `repository_name`: Repository name.
+    pub fn new_container_registry_repository_doesnt_exist(
+        event_details: EventDetails,
+        repository_name: String,
+        raw_error: Option<CommandError>,
+    ) -> EngineError {
+        let message = format!("Repository `{}` doesn't exists.", repository_name,);
+
+        EngineError::new(
+            event_details,
+            Tag::ContainerRegistryRepositoryDoesntExist,
+            message.to_string(),
+            message.to_string(),
+            raw_error,
+            None,
+            None,
+        )
+    }
+
+    /// Creates new error when trying to delete repository.
+    ///
+    /// Arguments:
+    ///
+    /// * `event_details`: Error linked event details.
+    /// * `repository_name`: Repository name.
+    /// * `raw_error`: Raw error message.
+    pub fn new_container_registry_delete_repository_error(
+        event_details: EventDetails,
+        repository_name: String,
+        raw_error: Option<CommandError>,
+    ) -> EngineError {
+        let message = format!("Failed to delete repository `{}`.", repository_name,);
+
+        EngineError::new(
+            event_details,
+            Tag::ContainerRegistryDeleteRepositoryError,
+            message.to_string(),
+            message.to_string(),
+            raw_error,
             None,
             None,
         )

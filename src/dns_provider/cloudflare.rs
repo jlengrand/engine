@@ -1,7 +1,7 @@
 use std::net::Ipv4Addr;
 
 use crate::dns_provider::{DnsProvider, Kind};
-use crate::error::{EngineError, EngineErrorCause};
+use crate::errors::EngineError;
 use crate::models::{Context, Domain};
 
 pub struct Cloudflare {
