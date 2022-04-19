@@ -3,9 +3,9 @@ entries:
   qovery-agent:
   - apiVersion: v2
     appVersion: 0.1.0
-    created: "2022-04-19T09:58:45.87820259Z"
+    created: "2022-04-19T12:21:23.09032587Z"
     description: A Helm chart for Kubernetes
-    digest: b489865342930188a3e593b43f7306e162b2b3d306fc38de0afdf5563861646f
+    digest: 6c83b45e9ee6f878abfaa392c56bd18d63c21a78e7bf75e0ec41e367161822d1
     name: qovery-agent
     type: application
     urls:
@@ -14,12 +14,12 @@ entries:
   qovery-shell-agent:
   - apiVersion: v2
     appVersion: 0.1.0
-    created: "2022-04-19T09:58:45.879180047Z"
+    created: "2022-04-19T12:21:23.091767491Z"
     description: A Helm chart for Kubernetes
-    digest: 6c32c6de9f57703da1d525e8e703a5dcca0bc7e2d6f30e3536fcf66747ae4bc4
+    digest: fa9c39d72d89fe64d681b778d7c1b327c37f5c29684a48a4ee39d7e18e08fece
     name: qovery-shell-agent
     type: application
     urls:
     - https://Qovery.github.io/engine/qovery-shell-agent-0.1.0.tgz
     version: 0.1.0
-generated: "2022-04-19T09:58:45.877437045Z"
+generated: "2022-04-19T12:21:23.087978237Z"
